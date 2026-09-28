@@ -112,7 +112,26 @@ If either condition is met, the pixel is drawn using the darkest material tone (
 
 ---
 
-## 6. Experiment Discoveries & Fixes Log
+## 6. 3D Camera Orbit & Projection Math
+
+To allow free 3D camera rotation around the hearth without pixel creep:
+
+1. **Orbit Coordinates**: Given distance $R$, target $\vec{T} = (0, -1.2, 0)$, yaw $\theta$, and pitch $\phi$:
+   $$\vec{P}_{\text{cam}} = (R \cos\phi \sin\theta, \; T_y + R \sin\phi, \; -R \cos\phi \cos\theta)$$
+2. **Camera Basis**:
+   $$\vec{F} = \frac{\vec{T} - \vec{P}_{\text{cam}}}{\|\vec{T} - \vec{P}_{\text{cam}}\|}, \quad \vec{R} = \frac{\vec{F} \times (0, 1, 0)}{\|\vec{F} \times (0, 1, 0)\|}, \quad \vec{U} = \vec{R} \times \vec{F}$$
+3. **Ray Generation**: For screen pixel $(x, y)$ mapped to viewport dimensions $(W_w, W_h)$:
+   $$\vec{P}_{\text{ray}} = \vec{P}_{\text{cam}} + w_x \vec{R} + w_y \vec{U}, \quad \vec{D}_{\text{ray}} = \vec{F}$$
+4. **World-to-Camera Projections**: 3D fire emitters, sparks, and ash particles project onto the camera plane via:
+   $$x_{\text{screen}} = \left(\frac{(\vec{P} - \vec{P}_{\text{cam}}) \cdot \vec{R}}{W_w} + 0.5\right) W_{\text{pixels}}$$
+   $$y_{\text{screen}} = \left(0.5 - \frac{(\vec{P} - \vec{P}_{\text{cam}}) \cdot \vec{U}}{W_h}\right) H_{\text{pixels}}$$
+   $$z_{\text{depth}} = (\vec{P} - \vec{P}_{\text{cam}}) \cdot \vec{F}$$
+
+![3D Camera Orbit Multi-Angle Views](media/camera_orbit_views.png)
+
+---
+
+## 7. Experiment Discoveries & Fixes Log
 
 | Issue | Root Cause | Solution |
 | --- | --- | --- |
@@ -123,3 +142,4 @@ If either condition is met, the pixel is drawn using the darkest material tone (
 | Fire appearing to ignite the dirt floor | Heat injected into a flat horizontal floor strip (`base_y`) | Seeded fire directly from the 3D wood contact surfaces and the elevated central cradle. Floor now only catches settled ash. |
 | Floating logs without gravity | Cylinder coordinates lacked a ground plane and had floating pivots | Defined ground plane at $Y = -4.2f$, grounded all base pivots, and implemented rotational gravity collapse around base pivots. |
 | Logs remaining dark in shadow of roaring fire | Light placed behind logs with rigid Lambertian cutoff ($N \cdot L \le 0$) | Placed flickering light source forward at $Z = -1.2f$ and applied Half-Lambert wrap lighting $\frac{N \cdot L + 0.45}{1.45}$, bathing curved log faces in warm amber and golden bands. |
+| Fixed camera angle preventing 3D scene inspection | Orthographic rays were locked to fixed $+Z$ vector | Implemented 3D spherical orbit camera with yaw/pitch rotation, real-time keyboard controls (`←/→/↑/↓`, `WASD`), and auto-turntable mode. |

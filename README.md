@@ -13,6 +13,7 @@ Uses a per-object pixel art shader pipeline with object-space snapping to elimin
 - **1-Pixel Outlines**: Screen-space edge detector over the object ID and depth buffers paints dark contour pixels at silhouette boundaries without anti-aliasing blur.
 - **Volumetric Fire Interleaving**: Convective flame grid with twin spires and incandescent core tested against the log depth buffer, allowing fire to wrap naturally both in front of and behind the wood.
 - **Falling Sand Ash Physics**: Burnt wood peels off as physical ash flakes that fall with gravity, roll over sloped log contours, and pile up at the hearth base.
+- **3D Camera Orbit & Turntable**: Real-time yaw and pitch camera orbit with arbitrary view matrix raycasting, allowing inspection of the 3D log stack and fire volume from any angle without pixel creep.
 - **ANSI Half-Block Output**: Encodes two vertical pixels per character cell (`\033[38;2;...m\033[48;2;...m▀`) with full native terminal background transparency.
 
 ## Building & Running
@@ -38,6 +39,10 @@ python3 bonfire.py
 
 | Key | Action |
 | --- | --- |
+| `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera left / right (yaw) |
+| `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera up / down (pitch) |
+| `t` | Toggle auto-turntable 360° rotation |
+| `0` or `z` | Reset camera angle to default |
 | `r` | Rekindle / restart bonfire lifecycle |
 | `c` | Trigger immediate structural log collapse |
 | `+` / `-` | Increase / decrease simulation speed |

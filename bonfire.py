@@ -5,6 +5,7 @@ Features:
 - Unicode half-blocks '▀' (2 vertical pixels per cell)
 - 3D cylindrical logs with grounded bases (true gravity stack)
 - Rotational collapse under gravity around grounded base pivots
+- Dynamic 3D Camera Orbit & Turntable (Yaw θ, Pitch φ)
 - Fire emanates directly from burning wood surfaces and cradle (not the floor)
 - Dynamic flickering wrap lighting bathing the logs in warm amber & golden tones
 - 1-pixel cel-art outlines
@@ -160,7 +161,8 @@ def main():
     tty.setcbreak(sys.stdin.fileno())
 
     def cleanup(*args):
-        sys.stdout.write("\033[?1049l\033[?25h\033[0m\n")
+        sys.stdout.write("[?1049l[?25h[0m
+")
         sys.stdout.flush()
         termios.tcsetattr(sys.stdin, termios.TCSADRAIN, old_settings)
         sys.exit(0)
@@ -168,7 +170,7 @@ def main():
     signal.signal(signal.SIGINT, cleanup)
     signal.signal(signal.SIGTERM, cleanup)
 
-    sys.stdout.write("\033[?1049h\033[?25l\033[2J")
+    sys.stdout.write("[?1049h[?25l[2J")
     sys.stdout.flush()
 
     try:
@@ -195,6 +197,11 @@ def main():
     force_collapse = False
     paused = False
 
+    # Camera Orbit Parameters
+    cam_yaw = 0.0
+    cam_pitch = 0.32
+    auto_turntable = False
+
     fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
     next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
     fire_z = [[0.0 for _ in range(pw)] for _ in range(ph)]
@@ -219,14 +226,46 @@ def main():
                 next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 fire_z = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
-                sys.stdout.write("\033[2J")
+                sys.stdout.write("[2J")
         except Exception:
             pass
 
-        r, _, _ = select.select([sys.stdin], [], [], 0)
-        if r:
+        # Handle non-blocking keyboard input
+        while True:
+            r, _, _ = select.select([sys.stdin], [], [], 0)
+            if not r:
+                break
             ch = sys.stdin.read(1)
-            if ch in ('q', 'Q'):
+            if ch == '':
+                seq = ""
+                while True:
+                    r2, _, _ = select.select([sys.stdin], [], [], 0.005)
+                    if not r2: break
+                    seq += sys.stdin.read(1)
+                    if len(seq) >= 2: break
+                if seq == "[A": # Up arrow -> pitch up
+                    cam_pitch = min(1.25, cam_pitch + 0.06)
+                elif seq == "[B": # Down arrow -> pitch down
+                    cam_pitch = max(-0.15, cam_pitch - 0.06)
+                elif seq == "[C": # Right arrow -> yaw right
+                    cam_yaw += 0.08
+                elif seq == "[D": # Left arrow -> yaw left
+                    cam_yaw -= 0.08
+            elif ch in ('a', 'A', 'h'):
+                cam_yaw -= 0.08
+            elif ch in ('d', 'D', 'l'):
+                cam_yaw += 0.08
+            elif ch in ('w', 'W', 'k'):
+                cam_pitch = min(1.25, cam_pitch + 0.06)
+            elif ch in ('s', 'S', 'j'):
+                cam_pitch = max(-0.15, cam_pitch - 0.06)
+            elif ch in ('t', 'T'):
+                auto_turntable = not auto_turntable
+            elif ch in ('0', 'z', 'Z'):
+                cam_yaw = 0.0
+                cam_pitch = 0.32
+                auto_turntable = False
+            elif ch in ('q', 'Q'):
                 cleanup()
             elif ch in ('r', 'R'):
                 sim_time = 0.0
@@ -250,6 +289,9 @@ def main():
                 time_scale = min(8.0, time_scale * 1.4)
             elif ch in ('-', '_'):
                 time_scale = max(0.2, time_scale / 1.4)
+
+        if auto_turntable and not paused:
+            cam_yaw += 0.02 * time_scale
 
         if not paused:
             sim_time += 0.045 * time_scale
@@ -284,10 +326,53 @@ def main():
                     l.p2[2] = l.p2_orig[2] * (1.0 - collapse) + l.p2_collapsed[2] * collapse
                     l.recompute()
 
+            # Camera 3D Orbit Coordinates
+            target = [0.0, -1.2, 0.0]
+            cam_dist = 28.0
+            cam_pos = [
+                cam_dist * math.cos(cam_pitch) * math.sin(cam_yaw),
+                target[1] + cam_dist * math.sin(cam_pitch),
+                -cam_dist * math.cos(cam_pitch) * math.cos(cam_yaw)
+            ]
+
+            fx = target[0] - cam_pos[0]
+            fy = target[1] - cam_pos[1]
+            fz = target[2] - cam_pos[2]
+            fl = math.sqrt(fx*fx + fy*fy + fz*fz) + 1e-6
+            fwd = [fx/fl, fy/fl, fz/fl]
+
+            rx = fwd[2]
+            rz = -fwd[0]
+            rl = math.sqrt(rx*rx + rz*rz) + 1e-6
+            right = [rx/rl, 0.0, rz/rl]
+
+            up = [
+                right[1]*fwd[2] - right[2]*fwd[1],
+                right[2]*fwd[0] - right[0]*fwd[2],
+                right[0]*fwd[1] - right[1]*fwd[0]
+            ]
+
             world_w, world_h = 22.0, 14.0
-            cx = pw // 2
-            left_spire_x = cx - int(pw * 0.11)
-            right_spire_x = cx + int(pw * 0.09)
+
+            # 3D projected screen positions for fire emitters
+            left_spire_w = [-1.2, -1.6, 0.4]
+            right_spire_w = [1.0, -1.6, -0.2]
+            core_w = [0.0, -1.8, 0.0]
+
+            def project_pt(p):
+                rx_p = p[0] - cam_pos[0]
+                ry_p = p[1] - cam_pos[1]
+                rz_p = p[2] - cam_pos[2]
+                sx = ((rx_p*right[0] + ry_p*right[1] + rz_p*right[2]) / world_w + 0.5) * pw
+                sy = (0.5 - (rx_p*up[0] + ry_p*up[1] + rz_p*up[2]) / world_h) * ph
+                sz = rx_p*fwd[0] + ry_p*fwd[1] + rz_p*fwd[2]
+                return sx, sy, sz
+
+            left_spire_x, _, _ = project_pt(left_spire_w)
+            right_spire_x, _, _ = project_pt(right_spire_w)
+            cx_f, cy_f, _ = project_pt(core_w)
+            cx = int(cx_f)
+            cradle_y = max(10, min(ph - 4, int(cy_f)))
 
             # 1. Heat from burning wood contacts
             for l in logs:
@@ -298,17 +383,16 @@ def main():
                     px = l.p1[0] + t_val * l.axis[0]
                     py = l.p1[1] + t_val * l.axis[1]
                     pz = l.p1[2] + t_val * l.axis[2]
-                    dist_c = math.sqrt(px*px + (py + 2.0)**2)
+                    dist_c = math.sqrt(px*px + (py + 2.0)**2 + pz*pz)
                     if dist_c < 4.5:
-                        gx = int(((px / world_w) + 0.5) * pw)
-                        gy = int(((0.5 - (py / world_h))) * ph)
+                        gx_f, gy_f, gz = project_pt([px, py, pz])
+                        gx, gy = int(gx_f), int(gy_f)
                         if 0 <= gx < pw and 0 <= gy < ph:
                             wfire = (0.92 - (dist_c / 4.5) * 0.25) * intensity
                             fire_heat[gy][gx] = max(fire_heat[gy][gx], wfire)
-                            fire_z[gy][gx] = pz - 0.25
+                            fire_z[gy][gx] = gz - 0.25
 
             # 2. Glowing cradle ember bed
-            cradle_y = int(ph * (0.74 + collapse * 0.08))
             for dy in range(-4, 5):
                 for dx in range(-14, 15):
                     d = math.sqrt((dx * 0.75)**2 + (dy * 1.8)**2)
@@ -317,7 +401,8 @@ def main():
                         gx, gy = cx + dx, cradle_y + dy
                         if 0 <= gx < pw and 0 <= gy < ph:
                             fire_heat[gy][gx] = max(fire_heat[gy][gx], h)
-                            fire_z[gy][gx] = -0.4
+                            _, _, gz = project_pt(core_w)
+                            fire_z[gy][gx] = gz - 0.4
 
             # 3. Convective flame propagation: ROARING TWIN SPIRES
             for y in range(cradle_y, 2, -1):
@@ -353,40 +438,50 @@ def main():
                     val = max(0.0, below - decay)
                     next_fire[y][x] = val
 
-                    if is_left: fire_z[y][x] = 0.25
-                    elif is_right: fire_z[y][x] = -0.25
-                    else: fire_z[y][x] = -0.45
+                    _, _, gz_core = project_pt(core_w)
+                    if is_left:
+                        _, _, gz_l = project_pt(left_spire_w)
+                        fire_z[y][x] = gz_l - 0.2
+                    elif is_right:
+                        _, _, gz_r = project_pt(right_spire_w)
+                        fire_z[y][x] = gz_r - 0.2
+                    else:
+                        fire_z[y][x] = gz_core - 0.45
 
-            for y in range(2, cradle_y + 1):
+            for y in range(ph):
                 for x in range(pw):
                     fire_heat[y][x] = next_fire[y][x]
 
-            # Sparks
-            if intensity > 0.40 and random.random() < 0.20:
-                sx = left_spire_x + (random.random() - 0.5) * 4.0
-                sy = cradle_y * 0.35
-                sparks.append([sx, sy, wind * 0.25, -0.7 - random.random() * 0.4, random.randint(18, 35), PALETTE_EMBERS[1]])
-            if intensity > 0.50 and random.random() < 0.25:
-                sx = right_spire_x + (random.random() - 0.5) * 5.0
-                sy = cradle_y * 0.20
-                sparks.append([sx, sy, wind * 0.30, -0.8 - random.random() * 0.4, random.randint(20, 40), PALETTE_EMBERS[2]])
+            # 4. Particles (3D Sparks & Ash)
+            if intensity > 0.3 and len(sparks) < 55 and random.random() < 0.75:
+                sx = cx_f + (random.random() - 0.5) * 16.0
+                sy = float(cradle_y) - 2.0
+                vx = (random.random() - 0.5) * 1.5 + wind * 1.8
+                vy = -(random.random() * 2.2 + 1.2)
+                col = PALETTE_EMBERS[random.choice([2, 3, 4])]
+                sparks.append([sx, sy, vx, vy, random.randint(18, 48), col])
 
             alive_sparks = []
             for s in sparks:
                 s[0] += s[2]
                 s[1] += s[3]
+                s[3] += 0.04
                 s[4] -= 1
                 if s[4] > 0 and 0 <= s[0] < pw and 0 <= s[1] < ph:
                     alive_sparks.append(s)
             sparks = alive_sparks
 
-            # Flakes
-            if intensity > 0.40 and random.random() < 0.15:
-                ash_flakes.append([cx + (random.random() - 0.5) * 20.0, cradle_y * 0.6, (random.random() - 0.5) * 0.4, 0.4, PALETTE_ASH[2]])
+            if intensity > 0.4 and len(ash_flakes) < 45 and random.random() < 0.45:
+                ax = cx_f + (random.random() - 0.5) * 32.0
+                ay = max(2.0, float(cradle_y) - 18.0)
+                vx = (random.random() - 0.5) * 0.9 + wind * 1.4
+                vy = random.random() * 0.6 + 0.3
+                ash_col = PALETTE_ASH[random.choice([1, 2, 3])]
+                ash_flakes.append([ax, ay, vx, vy, ash_col])
 
             alive_flakes = []
             for f in ash_flakes:
-                f[0] += f[2] + wind * 0.1
+                f[0] += f[2] + math.sin(f[1] * 0.2 + sim_time) * 0.35
                 f[1] += f[3]
                 ix, iy = int(round(f[0])), int(round(f[1]))
                 if 0 <= ix < pw and iy < ph:
@@ -396,15 +491,41 @@ def main():
                         alive_flakes.append(f)
             ash_flakes = alive_flakes
 
-        # 3D Raycasting with Wrap Lighting
+        # Camera Projection & Raycasting
         id_buf = [[0 for _ in range(pw)] for _ in range(ph)]
         depth_buf = [[1e9 for _ in range(pw)] for _ in range(ph)]
         shade_buf = [[(0, 0, 0) for _ in range(pw)] for _ in range(ph)]
         frame_sky = [[True for _ in range(pw)] for _ in range(ph)]
         frame_col = [[(0, 0, 0) for _ in range(pw)] for _ in range(ph)]
 
+        # Camera direction & ray parameters
+        target = [0.0, -1.2, 0.0]
+        cam_dist = 28.0
+        cam_pos = [
+            cam_dist * math.cos(cam_pitch) * math.sin(cam_yaw),
+            target[1] + cam_dist * math.sin(cam_pitch),
+            -cam_dist * math.cos(cam_pitch) * math.cos(cam_yaw)
+        ]
+
+        fx = target[0] - cam_pos[0]
+        fy = target[1] - cam_pos[1]
+        fz = target[2] - cam_pos[2]
+        fl = math.sqrt(fx*fx + fy*fy + fz*fz) + 1e-6
+        fwd = [fx/fl, fy/fl, fz/fl]
+
+        rx = fwd[2]
+        rz = -fwd[0]
+        rl = math.sqrt(rx*rx + rz*rz) + 1e-6
+        right = [rx/rl, 0.0, rz/rl]
+
+        up = [
+            right[1]*fwd[2] - right[2]*fwd[1],
+            right[2]*fwd[0] - right[0]*fwd[2],
+            right[0]*fwd[1] - right[1]*fwd[0]
+        ]
+
         world_w, world_h = 22.0, 14.0
-        rd = [0.0, 0.0, 1.0]
+        rd = fwd
         
         flicker = 1.0 + 0.16 * math.sin(sim_time * 8.0) + 0.10 * math.cos(sim_time * 13.0)
         light_pos = [0.0, -1.8, -1.2]
@@ -414,7 +535,11 @@ def main():
             wy = (((ph - 1 - y) / ph) - 0.5) * world_h
             for x in range(pw):
                 wx = ((x / pw) - 0.5) * world_w
-                ro = [wx, wy, -40.0]
+                ro = [
+                    cam_pos[0] + wx * right[0] + wy * up[0],
+                    cam_pos[1] + wx * right[1] + wy * up[1],
+                    cam_pos[2] + wx * right[2] + wy * up[2]
+                ]
 
                 closest_t = 1e9
                 hit_data = None
@@ -430,7 +555,7 @@ def main():
                 if hit_log:
                     t, pt, norm, u, v, is_cap, rf = hit_data
                     id_buf[y][x] = hit_log.obj_id
-                    depth_buf[y][x] = pt[2]
+                    depth_buf[y][x] = (pt[0]-cam_pos[0])*fwd[0] + (pt[1]-cam_pos[1])*fwd[1] + (pt[2]-cam_pos[2])*fwd[2]
 
                     # Lighting
                     lx, ly, lz = light_pos[0]-pt[0], light_pos[1]-pt[1], light_pos[2]-pt[2]
@@ -463,7 +588,7 @@ def main():
                             bidx = min(6, max(1, int(lval * bmod * 3.3)))
                             shade_buf[y][x] = PALETTE_WOOD[bidx]
 
-        # Outline
+        # 1-Pixel Cel Outline
         for y in range(ph):
             for x in range(pw):
                 cid = id_buf[y][x]
@@ -481,22 +606,34 @@ def main():
                             is_edge = True
                             break
 
-                frame_sky[y][x] = False
-                frame_col[y][x] = PALETTE_WOOD[0] if is_edge else shade_buf[y][x]
+                if is_edge:
+                    frame_col[y][x] = PALETTE_WOOD[0]
+                    frame_sky[y][x] = False
+                else:
+                    frame_col[y][x] = shade_buf[y][x]
+                    frame_sky[y][x] = False
 
-        # Fire compositing
+        # Composite Fire Heat Layer with Depth Buffer
         for y in range(ph):
             for x in range(pw):
                 heat = fire_heat[y][x]
-                if heat > 0.08:
-                    if heat > 0.82: fcol = PALETTE_EMBERS[4]
-                    elif heat > 0.58: fcol = PALETTE_EMBERS[3]
-                    elif heat > 0.35: fcol = PALETTE_EMBERS[2]
-                    elif heat > 0.18: fcol = PALETTE_EMBERS[1]
-                    else: fcol = PALETTE_EMBERS[0]
+                if heat > 0.05:
+                    if heat > 0.85:
+                        fcol = PALETTE_EMBERS[4]
+                    elif heat > 0.65:
+                        fcol = PALETTE_EMBERS[3]
+                    elif heat > 0.40:
+                        fcol = PALETTE_EMBERS[2]
+                    elif heat > 0.18:
+                        fcol = PALETTE_EMBERS[1]
+                    else:
+                        fcol = PALETTE_EMBERS[0]
 
                     if id_buf[y][x] > 0:
-                        if fire_z[y][x] < depth_buf[y][x] or heat > 0.65:
+                        if fire_z[y][x] < depth_buf[y][x]:
+                            frame_col[y][x] = fcol
+                            frame_sky[y][x] = False
+                        elif heat > 0.55:
                             frame_col[y][x] = fcol
                             frame_sky[y][x] = False
                     else:
@@ -525,7 +662,7 @@ def main():
                 frame_sky[iy][ix] = False
 
         # Present frame
-        out = ["\033[H"]
+        out = ["[H"]
         p_fg, p_bg, p_transp = None, None, True
 
         for tr in range(ph // 2):
@@ -537,38 +674,39 @@ def main():
 
                 if st and sb:
                     if not p_transp:
-                        out.append("\033[49m")
+                        out.append("[49m")
                         p_transp = True
                         p_bg = None
                     out.append(" ")
                 elif st and not sb:
                     if cb != p_fg:
-                        out.append(f"\033[38;2;{cb[0]};{cb[1]};{cb[2]}m")
+                        out.append(f"[38;2;{cb[0]};{cb[1]};{cb[2]}m")
                         p_fg = cb
                     if not p_transp:
-                        out.append("\033[49m")
+                        out.append("[49m")
                         p_transp = True
                         p_bg = None
                     out.append("▄")
                 elif not st and sb:
                     if ct != p_fg:
-                        out.append(f"\033[38;2;{ct[0]};{ct[1]};{ct[2]}m")
+                        out.append(f"[38;2;{ct[0]};{ct[1]};{ct[2]}m")
                         p_fg = ct
                     if not p_transp:
-                        out.append("\033[49m")
+                        out.append("[49m")
                         p_transp = True
                         p_bg = None
                     out.append("▀")
                 else:
                     if ct != p_fg:
-                        out.append(f"\033[38;2;{ct[0]};{ct[1]};{ct[2]}m")
+                        out.append(f"[38;2;{ct[0]};{ct[1]};{ct[2]}m")
                         p_fg = ct
                     if cb != p_bg:
-                        out.append(f"\033[48;2;{cb[0]};{cb[1]};{cb[2]}m")
+                        out.append(f"[48;2;{cb[0]};{cb[1]};{cb[2]}m")
                         p_bg = cb
                         p_transp = False
                     out.append("▀")
-            out.append("\033[0m\n")
+            out.append("[0m
+")
             p_fg, p_bg, p_transp = None, None, True
 
         stage_name = "1/7: Gravetos e Ignição"
@@ -579,12 +717,15 @@ def main():
         elif sim_time > 35.0: stage_name = "3/7: Fogueira Roaring"
         elif sim_time > 12.0: stage_name = "2/7: Chamas nas Toras"
 
-        out.append(f"\033[1;33m[3D Pixel Art Bonfire]\033[0m {sim_time:4.0f}s | Fase: \033[1;37m{stage_name}\033[0m | [r] Reiniciar | [c] Colapsar | [+/-] Vel | [q] Sair ")
+        yaw_deg = int(math.degrees(cam_yaw)) % 360
+        pitch_deg = int(math.degrees(cam_pitch))
+        tt_status = " [Turntable ON]" if auto_turntable else ""
+        out.append(f"[1;33m[3D Orbit][0m {yaw_deg:3d}° / {pitch_deg:2d}°{tt_status} | Fase: [1;37m{stage_name}[0m | [Setas/WASD] Girar | [t] Turntable | [c] Colapsar | [r] Reset | [q] Sair ")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
 
         time.sleep(0.028)
 
-if __name__ == "__main__":
+if __name__ == '__main__':
     main()

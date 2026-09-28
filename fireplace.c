@@ -83,8 +83,8 @@ typedef struct {
 } Cylinder3D;
 
 typedef struct {
-    float x, y;
-    float vx, vy;
+    Vec3 pos;
+    Vec3 vel;
     int life;
     int max_life;
     RGB color;
@@ -92,8 +92,8 @@ typedef struct {
 } Spark;
 
 typedef struct {
-    float x, y;
-    float vx, vy;
+    Vec3 pos;
+    Vec3 vel;
     RGB color;
     bool active;
 } AshFlake;
@@ -127,12 +127,17 @@ static float g_fire_z[MAX_PIXEL_ROWS][MAX_COLS];
 // Static ash grid for settled sand heap
 static uint8_t g_settled_ash[MAX_PIXEL_ROWS][MAX_COLS];
 
-// Particles
+// 3D Particles
 static Spark g_sparks[MAX_SPARKS];
 static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 
 // 3D Logs
 static Cylinder3D g_logs[4];
+
+// 3D Camera State
+static float g_cam_yaw = 0.0f;       // Horizontal orbit angle (radians)
+static float g_cam_pitch = 0.32f;    // Elevation angle (radians, ~18 deg)
+static bool g_auto_turntable = false; // Auto 360 degree turntable rotation
 
 // Simulation dynamics
 static float g_sim_time = 0.0f;
@@ -271,7 +276,6 @@ static void update_dimensions(void) {
     if (g_pixel_h < 30) g_pixel_h = 30;
 }
 
-// Builds the physical 3D campfire stack where ALL bases rest firmly on the ground!
 static void init_scene(void) {
     memset(g_fire_heat, 0, sizeof(g_fire_heat));
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -313,7 +317,6 @@ static void init_scene(void) {
                   (Vec3){-2.0f, ground_y + 1.4f, 1.2f},
                   0.95f);
 
-    // Seed initial ignition flame inside the central wood cradle
     int cx = g_pixel_w / 2;
     int cradle_y = (int)(g_pixel_h * 0.72f);
     g_fire_heat[cradle_y][cx] = 0.65f;
@@ -419,13 +422,11 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
     return hit;
 }
 
-static void spawn_spark(float x, float y, float vx, float vy, int life, RGB color) {
+static void spawn_spark_3d(Vec3 pos, Vec3 vel, int life, RGB color) {
     for (int i = 0; i < MAX_SPARKS; i++) {
         if (!g_sparks[i].active) {
-            g_sparks[i].x = x;
-            g_sparks[i].y = y;
-            g_sparks[i].vx = vx;
-            g_sparks[i].vy = vy;
+            g_sparks[i].pos = pos;
+            g_sparks[i].vel = vel;
             g_sparks[i].life = life;
             g_sparks[i].max_life = life;
             g_sparks[i].color = color;
@@ -435,13 +436,15 @@ static void spawn_spark(float x, float y, float vx, float vy, int life, RGB colo
     }
 }
 
-static void spawn_ash_flake(float x, float y) {
+static void spawn_ash_flake_3d(Vec3 pos) {
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (!g_ash_flakes[i].active) {
-            g_ash_flakes[i].x = x;
-            g_ash_flakes[i].y = y;
-            g_ash_flakes[i].vx = (rand_f() - 0.5f) * 0.4f;
-            g_ash_flakes[i].vy = 0.35f + rand_f() * 0.35f;
+            g_ash_flakes[i].pos = pos;
+            g_ash_flakes[i].vel = (Vec3){
+                (rand_f() - 0.5f) * 0.08f,
+                -0.08f - rand_f() * 0.06f,
+                (rand_f() - 0.5f) * 0.08f
+            };
             g_ash_flakes[i].color = PALETTE_ASH[rand_range(1, 3)];
             g_ash_flakes[i].active = true;
             break;
@@ -453,6 +456,12 @@ static void update_simulation(void) {
     if (g_paused) return;
 
     g_sim_time += 0.045f * g_time_scale;
+
+    // Turntable camera rotation
+    if (g_auto_turntable) {
+        g_cam_yaw += 0.02f * g_time_scale;
+        if (g_cam_yaw > 2.0f * (float)M_PI) g_cam_yaw -= 2.0f * (float)M_PI;
+    }
 
     // Wind dynamics
     if (rand_f() < 0.05f) {
@@ -493,16 +502,43 @@ static void update_simulation(void) {
         }
     }
 
-    int cx = g_pixel_w / 2;
-    float left_spire_x = cx - g_pixel_w * 0.11f;
-    float right_spire_x = cx + g_pixel_w * 0.09f;
+    // Compute Camera Vectors for 3D world projection
+    Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
+    float cam_dist = 28.0f;
+    Vec3 cam_pos = (Vec3){
+        cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
+        target.y + cam_dist * sinf(g_cam_pitch),
+        -cam_dist * cosf(g_cam_pitch) * cosf(g_cam_yaw)
+    };
+    Vec3 fwd = vec3_norm(vec3_sub(target, cam_pos));
+    Vec3 up_w = (Vec3){0.0f, 1.0f, 0.0f};
+    Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
+    Vec3 up = vec3_cross(right, fwd);
 
-    // =========================================================================
-    // FIRE INJECTION: Emanates from the BURNING WOOD & CRADLE, NOT THE DIRT FLOOR!
-    // =========================================================================
     float world_w = 22.0f;
     float world_h = 14.0f;
 
+    // Projected screen positions for 3D fire emitters
+    // 3D Anchor positions for the twin spires in world space:
+    Vec3 left_spire_w = (Vec3){-1.2f, -1.6f, 0.4f};
+    Vec3 right_spire_w = (Vec3){1.0f, -1.6f, -0.2f};
+    Vec3 core_w = (Vec3){0.0f, -1.8f, 0.0f};
+
+    Vec3 rel_l = vec3_sub(left_spire_w, cam_pos);
+    Vec3 rel_r = vec3_sub(right_spire_w, cam_pos);
+    Vec3 rel_c = vec3_sub(core_w, cam_pos);
+
+    float left_spire_x = ((vec3_dot(rel_l, right) / world_w) + 0.5f) * g_pixel_w;
+    float right_spire_x = ((vec3_dot(rel_r, right) / world_w) + 0.5f) * g_pixel_w;
+    float cx = ((vec3_dot(rel_c, right) / world_w) + 0.5f) * g_pixel_w;
+
+    int cradle_y = (int)((0.5f - (vec3_dot(rel_c, up) / world_h)) * g_pixel_h);
+    if (cradle_y < 10) cradle_y = 10;
+    if (cradle_y > g_pixel_h - 4) cradle_y = g_pixel_h - 4;
+
+    // =========================================================================
+    // FIRE INJECTION: Emanates from the BURNING WOOD & CRADLE
+    // =========================================================================
     // 1. Heat emitted from contact surfaces of the burning logs
     for (int i = 0; i < 4; i++) {
         if (intensity < 0.15f) continue;
@@ -511,31 +547,31 @@ static void update_simulation(void) {
             float t = (float)s / num_pts;
             Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
 
-            float dist_to_c = sqrtf(p.x * p.x + (p.y + 2.0f) * (p.y + 2.0f));
+            float dist_to_c = sqrtf(p.x * p.x + (p.y + 2.0f) * (p.y + 2.0f) + p.z * p.z);
             if (dist_to_c < 4.5f) {
-                int gx = (int)(((p.x / world_w) + 0.5f) * g_pixel_w);
-                int gy = (int)((0.5f - (p.y / world_h)) * g_pixel_h);
+                Vec3 p_rel = vec3_sub(p, cam_pos);
+                int gx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+                int gy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
                 if (gx >= 0 && gx < g_pixel_w && gy >= 0 && gy < g_pixel_h) {
                     float wood_fire = (0.92f - (dist_to_c / 4.5f) * 0.25f) * intensity;
                     g_fire_heat[gy][gx] = fmaxf(g_fire_heat[gy][gx], wood_fire);
-                    g_fire_z[gy][gx] = p.z - 0.25f; // Flame wraps in front of wood
+                    g_fire_z[gy][gx] = vec3_dot(p_rel, fwd) - 0.25f;
                 }
             }
         }
     }
 
-    // 2. Glowing white-hot ember bed nestled inside the cradle between Log 1 and Log 2
-    int cradle_y = (int)(g_pixel_h * (0.74f + g_collapse_progress * 0.08f));
+    // 2. Glowing white-hot ember bed nestled inside the cradle
     for (int dy = -4; dy <= 4; dy++) {
         for (int dx = -14; dx <= 14; dx++) {
             float d = sqrtf((dx * 0.75f) * (dx * 0.75f) + (dy * 1.8f) * (dy * 1.8f));
             if (d < 12.0f) {
                 float h = (1.0f - powf(d / 12.0f, 1.8f)) * intensity;
-                int gx = cx + dx;
+                int gx = (int)cx + dx;
                 int gy = cradle_y + dy;
                 if (gx >= 0 && gx < g_pixel_w && gy >= 0 && gy < g_pixel_h) {
                     g_fire_heat[gy][gx] = fmaxf(g_fire_heat[gy][gx], h);
-                    g_fire_z[gy][gx] = -0.4f; // In front of rear wood
+                    g_fire_z[gy][gx] = vec3_dot(rel_c, fwd) - 0.4f;
                 }
             }
         }
@@ -563,9 +599,8 @@ static void update_simulation(void) {
             float dr = fabsf((float)(x - (right_spire_x + sinf(y * 0.18f + g_sim_time) * 2.2f)));
             float dc = fabsf((float)(x - cx));
 
-            // Wide spires matching reference image!
             bool is_left = (dl < 8.0f) && (hr < 0.78f);
-            bool is_right = (dr < 9.5f) && (hr < 0.94f); // Right spire is tallest!
+            bool is_right = (dr < 9.5f) && (hr < 0.94f);
             bool is_core = (dc < 6.5f) && (hr < 0.52f);
 
             if (is_left || is_right || is_core) {
@@ -577,9 +612,9 @@ static void update_simulation(void) {
             float val = fmaxf(0.0f, below - decay);
             g_next_fire[y][x] = val;
 
-            if (is_left) g_fire_z[y][x] = 0.25f;
-            else if (is_right) g_fire_z[y][x] = -0.25f;
-            else g_fire_z[y][x] = -0.45f;
+            if (is_left) g_fire_z[y][x] = vec3_dot(rel_l, fwd) - 0.2f;
+            else if (is_right) g_fire_z[y][x] = vec3_dot(rel_r, fwd) - 0.2f;
+            else g_fire_z[y][x] = vec3_dot(rel_c, fwd) - 0.45f;
         }
     }
 
@@ -589,7 +624,7 @@ static void update_simulation(void) {
         }
     }
 
-    // Wood burning & flake detachment
+    // Wood burning & 3D flake detachment
     for (int i = 0; i < 4; i++) {
         if (intensity > 0.35f && g_logs[i].wood_health > 0.0f) {
             g_logs[i].wood_health -= 0.025f * g_time_scale;
@@ -598,65 +633,46 @@ static void update_simulation(void) {
             if (rand_f() < 0.12f && g_logs[i].ash_amount > 20.0f) {
                 float t = rand_f();
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
-                int px = (int)((p.x / world_w + 0.5f) * g_pixel_w);
-                int py = (int)((0.5f - (p.y / world_h)) * g_pixel_h);
-                if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
-                    spawn_ash_flake((float)px, (float)py);
-                }
+                spawn_ash_flake_3d(p);
             }
         }
     }
 
-    // Sparks off the spires
-    if (intensity > 0.40f && rand_f() < 0.18f) {
-        float sx = left_spire_x + (rand_f() - 0.5f) * 4.0f;
-        float sy = cradle_y * 0.35f;
-        spawn_spark(sx, sy, g_wind * 0.25f, -0.65f - rand_f() * 0.4f, rand_range(20, 40), PALETTE_EMBERS[1]);
+    // 3D Sparks launched off the spires
+    if (intensity > 0.40f && rand_f() < 0.20f) {
+        Vec3 sp_pos = vec3_add(left_spire_w, (Vec3){(rand_f()-0.5f)*1.5f, 1.2f, (rand_f()-0.5f)*1.5f});
+        Vec3 sp_vel = (Vec3){g_wind * 0.04f, 0.14f + rand_f()*0.08f, (rand_f()-0.5f)*0.04f};
+        spawn_spark_3d(sp_pos, sp_vel, rand_range(20, 42), PALETTE_EMBERS[1]);
     }
-    if (intensity > 0.50f && rand_f() < 0.22f) {
-        float sx = right_spire_x + (rand_f() - 0.5f) * 5.0f;
-        float sy = cradle_y * 0.20f;
-        spawn_spark(sx, sy, g_wind * 0.30f, -0.75f - rand_f() * 0.4f, rand_range(22, 45), PALETTE_EMBERS[2]);
+    if (intensity > 0.50f && rand_f() < 0.24f) {
+        Vec3 sp_pos = vec3_add(right_spire_w, (Vec3){(rand_f()-0.5f)*1.8f, 1.8f, (rand_f()-0.5f)*1.8f});
+        Vec3 sp_vel = (Vec3){g_wind * 0.05f, 0.16f + rand_f()*0.09f, (rand_f()-0.5f)*0.04f};
+        spawn_spark_3d(sp_pos, sp_vel, rand_range(22, 48), PALETTE_EMBERS[2]);
     }
 
-    // Update sparks
+    // Update 3D sparks
     for (int i = 0; i < MAX_SPARKS; i++) {
         if (!g_sparks[i].active) continue;
-        g_sparks[i].x += g_sparks[i].vx;
-        g_sparks[i].y += g_sparks[i].vy;
+        g_sparks[i].pos = vec3_add(g_sparks[i].pos, g_sparks[i].vel);
         g_sparks[i].life--;
-        int ix = (int)roundf(g_sparks[i].x);
-        int iy = (int)roundf(g_sparks[i].y);
-        if (g_sparks[i].life <= 0 || ix < 0 || ix >= g_pixel_w || iy < 0 || iy >= g_pixel_h) {
+        if (g_sparks[i].life <= 0 || g_sparks[i].pos.y > 10.0f) {
             g_sparks[i].active = false;
         }
     }
 
-    // Update ash flakes
+    // Update 3D ash flakes
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (!g_ash_flakes[i].active) continue;
-        g_ash_flakes[i].x += g_ash_flakes[i].vx + g_wind * 0.15f;
-        g_ash_flakes[i].y += g_ash_flakes[i].vy;
+        g_ash_flakes[i].pos = vec3_add(g_ash_flakes[i].pos, g_ash_flakes[i].vel);
+        g_ash_flakes[i].pos.x += g_wind * 0.01f;
 
-        int ix = (int)roundf(g_ash_flakes[i].x);
-        int iy = (int)roundf(g_ash_flakes[i].y);
-
-        if (ix < 0 || ix >= g_pixel_w || iy >= g_pixel_h) {
-            g_ash_flakes[i].active = false;
-            continue;
-        }
-
-        int ground_pixel_y = (int)(g_pixel_h * 0.85f);
-        if (iy >= ground_pixel_y || g_settled_ash[iy][ix]) {
-            if (iy < g_pixel_h && ix >= 0 && ix < g_pixel_w) {
-                g_settled_ash[iy][ix] = 1;
-            }
+        if (g_ash_flakes[i].pos.y <= -4.2f) {
             g_ash_flakes[i].active = false;
         }
     }
 }
 
-// 3D Scene Rendering with Per-Object Pixel Art Shader & Dynamic Lighting
+// 3D Scene Rendering with Camera Orbit & Per-Object Pixel Art Shader
 static void render_scene(void) {
     memset(g_id_buf, 0, sizeof(g_id_buf));
     for (int y = 0; y < g_pixel_h; y++) {
@@ -669,21 +685,34 @@ static void render_scene(void) {
 
     float world_w = 22.0f;
     float world_h = 14.0f;
-    Vec3 ray_dir = (Vec3){0.0f, 0.0f, 1.0f};
 
-    // =========================================================================
-    // DYNAMIC FLICKERING FIRE LIGHT SOURCE: Bathing the wood in warm firelight!
-    // =========================================================================
+    // Compute Camera Frame
+    Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
+    float cam_dist = 28.0f;
+    Vec3 cam_pos = (Vec3){
+        cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
+        target.y + cam_dist * sinf(g_cam_pitch),
+        -cam_dist * cosf(g_cam_pitch) * cosf(g_cam_yaw)
+    };
+    Vec3 fwd = vec3_norm(vec3_sub(target, cam_pos));
+    Vec3 up_w = (Vec3){0.0f, 1.0f, 0.0f};
+    Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
+    Vec3 up = vec3_cross(right, fwd);
+
+    // Dynamic flickering light source at the center of the fire
     float flicker = 1.0f + 0.16f * sinf(g_sim_time * 8.0f) + 0.10f * cosf(g_sim_time * 13.0f);
-    Vec3 light_pos = (Vec3){0.0f, -1.8f, -1.2f}; // Placed forward so front faces are lit!
+    Vec3 light_pos = (Vec3){0.0f, -1.8f, 0.0f};
     float light_intensity = 1.8f * flicker;
 
-    // 1. Geometric Raycast Pass (3D Cylinders with Object-Space Snapping)
+    // 1. Geometric Raycast Pass (3D Cylinders with Camera Space Projection)
     for (int y = 0; y < g_pixel_h; y++) {
-        float world_y = (((float)(g_pixel_h - 1 - y) / g_pixel_h) - 0.5f) * world_h;
+        float wy = (((float)(g_pixel_h - 1 - y) / g_pixel_h) - 0.5f) * world_h;
         for (int x = 0; x < g_pixel_w; x++) {
-            float world_x = (((float)x / g_pixel_w) - 0.5f) * world_w;
-            Vec3 ray_orig = (Vec3){world_x, world_y, -40.0f};
+            float wx = (((float)x / g_pixel_w) - 0.5f) * world_w;
+
+            // Orthographic ray in camera space (Anti-Pixel Creep)
+            Vec3 ray_orig = vec3_add(cam_pos, vec3_add(vec3_scale(right, wx), vec3_scale(up, wy)));
+            Vec3 ray_dir = fwd;
 
             float closest_t = 1e9f;
             Vec3 hit_pt, hit_norm;
@@ -711,9 +740,9 @@ static void render_scene(void) {
 
             if (hit_log != NULL) {
                 g_id_buf[y][x] = hit_log->obj_id;
-                g_depth_buf[y][x] = hit_pt.z;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(hit_pt, cam_pos), fwd);
 
-                // Dynamic point light with wrap-lighting
+                // Dynamic fire point light with wrap-lighting
                 Vec3 l_vec = vec3_sub(light_pos, hit_pt);
                 float l_dist = vec3_len(l_vec);
                 Vec3 l_dir = vec3_norm(l_vec);
@@ -826,35 +855,39 @@ static void render_scene(void) {
         }
     }
 
-    // 4. Settled Ash Heap
-    for (int y = 0; y < g_pixel_h; y++) {
-        for (int x = 0; x < g_pixel_w; x++) {
-            if (g_settled_ash[y][x]) {
-                g_frame[y][x].color = PALETTE_ASH[((x + y) % 2 == 0) ? 2 : 3];
-                g_frame[y][x].is_sky = false;
+    // 4. Projected 3D Sparks
+    for (int i = 0; i < MAX_SPARKS; i++) {
+        if (!g_sparks[i].active) continue;
+        Vec3 rel_sp = vec3_sub(g_sparks[i].pos, cam_pos);
+        float sp_d = vec3_dot(rel_sp, fwd);
+        if (sp_d <= 0.1f) continue;
+
+        int sx = (int)(((vec3_dot(rel_sp, right) / world_w) + 0.5f) * g_pixel_w);
+        int sy = (int)((0.5f - (vec3_dot(rel_sp, up) / world_h)) * g_pixel_h);
+
+        if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+            if (sp_d < g_depth_buf[sy][sx] || g_frame[sy][sx].is_sky) {
+                g_frame[sy][sx].color = g_sparks[i].color;
+                g_frame[sy][sx].is_sky = false;
             }
         }
     }
 
-    // 5. Falling Ash Flakes
+    // 5. Projected 3D Ash Flakes
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (!g_ash_flakes[i].active) continue;
-        int ix = (int)roundf(g_ash_flakes[i].x);
-        int iy = (int)roundf(g_ash_flakes[i].y);
-        if (ix >= 0 && ix < g_pixel_w && iy >= 0 && iy < g_pixel_h) {
-            g_frame[iy][ix].color = g_ash_flakes[i].color;
-            g_frame[iy][ix].is_sky = false;
-        }
-    }
+        Vec3 rel_af = vec3_sub(g_ash_flakes[i].pos, cam_pos);
+        float af_d = vec3_dot(rel_af, fwd);
+        if (af_d <= 0.1f) continue;
 
-    // 6. Sparks
-    for (int i = 0; i < MAX_SPARKS; i++) {
-        if (!g_sparks[i].active) continue;
-        int ix = (int)roundf(g_sparks[i].x);
-        int iy = (int)roundf(g_sparks[i].y);
-        if (ix >= 0 && ix < g_pixel_w && iy >= 0 && iy < g_pixel_h) {
-            g_frame[iy][ix].color = g_sparks[i].color;
-            g_frame[iy][ix].is_sky = false;
+        int ax = (int)(((vec3_dot(rel_af, right) / world_w) + 0.5f) * g_pixel_w);
+        int ay = (int)((0.5f - (vec3_dot(rel_af, up) / world_h)) * g_pixel_h);
+
+        if (ax >= 0 && ax < g_pixel_w && ay >= 0 && ay < g_pixel_h) {
+            if (af_d < g_depth_buf[ay][ax] || g_frame[ay][ax].is_sky) {
+                g_frame[ay][ax].color = g_ash_flakes[i].color;
+                g_frame[ay][ax].is_sky = false;
+            }
         }
     }
 }
@@ -955,9 +988,13 @@ static void present_frame(void) {
     else if (g_sim_time > 35.0f) stage_name = "3/7: Fogueira Roaring";
     else if (g_sim_time > 12.0f) stage_name = "2/7: Chamas nas Toras";
 
+    int yaw_deg = (int)roundf(g_cam_yaw * 180.0f / (float)M_PI) % 360;
+    if (yaw_deg < 0) yaw_deg += 360;
+    int pitch_deg = (int)roundf(g_cam_pitch * 180.0f / (float)M_PI);
+
     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-        "\033[1;33m[3D Pixel Art Bonfire]\033[0m %4.0fs | Fase: \033[1;37m%s\033[0m | [r] Reiniciar | [c] Colapsar | [+/-] Vel | [q] Sair ",
-        g_sim_time, stage_name);
+        "\033[1;33m[3D Bonfire]\033[0m %4.0fs | Fase: \033[1;37m%s\033[0m | Cam: \033[1;36m%d°/%d°%s\033[0m | [Setas/WASD] Girar | [t] Turntable | [q] Sair ",
+        g_sim_time, stage_name, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
 
     if (buf_len > 0) {
         safe_write(STDOUT_FILENO, buf, buf_len);
@@ -965,29 +1002,55 @@ static void present_frame(void) {
 }
 
 static void handle_input(void) {
-    fd_set fds;
-    FD_ZERO(&fds);
-    FD_SET(STDIN_FILENO, &fds);
-    struct timeval tv = {0, 0};
-
-    if (select(STDIN_FILENO + 1, &fds, NULL, NULL, &tv) > 0) {
-        char ch;
-        if (read(STDIN_FILENO, &ch, 1) > 0) {
-            if (ch == 'q' || ch == 'Q') {
-                g_running = 0;
-            } else if (ch == 'r' || ch == 'R') {
-                init_scene();
-            } else if (ch == 'c' || ch == 'C') {
-                g_force_collapse = true;
-            } else if (ch == ' ') {
-                g_paused = !g_paused;
-            } else if (ch == '+' || ch == '=') {
-                g_time_scale *= 1.4f;
-                if (g_time_scale > 10.0f) g_time_scale = 10.0f;
-            } else if (ch == '-' || ch == '_') {
-                g_time_scale /= 1.4f;
-                if (g_time_scale < 0.2f) g_time_scale = 0.2f;
+    char ch;
+    while (read(STDIN_FILENO, &ch, 1) > 0) {
+        if (ch == '\033') {
+            char seq[2];
+            if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
+                if (seq[0] == '[') {
+                    if (seq[1] == 'A') { // Up arrow -> pitch up
+                        g_cam_pitch += 0.06f;
+                        if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+                    } else if (seq[1] == 'B') { // Down arrow -> pitch down
+                        g_cam_pitch -= 0.06f;
+                        if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+                    } else if (seq[1] == 'C') { // Right arrow -> yaw right
+                        g_cam_yaw += 0.08f;
+                    } else if (seq[1] == 'D') { // Left arrow -> yaw left
+                        g_cam_yaw -= 0.08f;
+                    }
+                }
             }
+        } else if (ch == 'a' || ch == 'A' || ch == 'h') {
+            g_cam_yaw -= 0.08f;
+        } else if (ch == 'd' || ch == 'D' || ch == 'l') {
+            g_cam_yaw += 0.08f;
+        } else if (ch == 'w' || ch == 'W' || ch == 'k') {
+            g_cam_pitch += 0.06f;
+            if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+        } else if (ch == 's' || ch == 'S' || ch == 'j') {
+            g_cam_pitch -= 0.06f;
+            if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+        } else if (ch == 't' || ch == 'T') {
+            g_auto_turntable = !g_auto_turntable;
+        } else if (ch == '0' || ch == 'z' || ch == 'Z') {
+            g_cam_yaw = 0.0f;
+            g_cam_pitch = 0.32f;
+            g_auto_turntable = false;
+        } else if (ch == 'q' || ch == 'Q') {
+            g_running = 0;
+        } else if (ch == 'r' || ch == 'R') {
+            init_scene();
+        } else if (ch == 'c' || ch == 'C') {
+            g_force_collapse = true;
+        } else if (ch == ' ') {
+            g_paused = !g_paused;
+        } else if (ch == '+' || ch == '=') {
+            g_time_scale *= 1.4f;
+            if (g_time_scale > 10.0f) g_time_scale = 10.0f;
+        } else if (ch == '-' || ch == '_') {
+            g_time_scale /= 1.4f;
+            if (g_time_scale < 0.2f) g_time_scale = 0.2f;
         }
     }
 }
@@ -998,6 +1061,8 @@ int main(int argc, char **argv) {
         g_pixel_h = 70;
         init_scene();
         if (argc > 3) g_sim_time = atof(argv[3]);
+        if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
+        if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
         for (int i = 0; i < 40; i++) update_simulation();
         render_scene();
         FILE *f = fopen(argv[2], "wb");
@@ -1033,7 +1098,7 @@ int main(int argc, char **argv) {
         present_frame();
 
         ts.tv_sec = 0;
-        ts.tv_nsec = 28000000L;
+        ts.tv_nsec = 24000000L; // ~40 FPS for smooth rotation
         nanosleep(&ts, NULL);
     }
 
