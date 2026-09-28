@@ -2,16 +2,17 @@
  * 3D Per-Object Pixel Art Bonfire Simulation (C Edition)
  *
  * Techniques:
- * - 3D Spherical Orbit Camera (Yaw θ, Pitch φ) with free real-time rotation
- * - 3 Physical Wood Stacking Modes (Log Cabin, Teepee, Pyramid) with contact physics
- * - Discrete Object-Space Bark Plates (Zero Pixel Creep, NO orange tiger stripes)
+ * - 3D Spherical Orbit Camera (Yaw θ, Pitch φ) with real-time controls & turntable
+ * - 3D Stone Fire Ring (Base da Fogueira) with natural rock shading
+ * - Segmented Wood Combustion (10 longitudinal segments per log):
+ *   Fresh Wood -> Smoking -> Burning Flames -> Charred Black -> Brittle Ash
+ * - Zero Floor Fire: Flames originate strictly from burning wood and central kindling
+ * - Physical Self-Collapse Kinematics under gravity as structural mass burns away
+ * - 3 Physical Stacking Modes: Fogueira Quadrada (Log Cabin), Tenda Cônica (Teepee), Pirâmide
+ * - Discrete Object-Space Bark Plates (No orange tiger stripes, zero pixel creep)
  * - Concentric Growth Rings on Cut End-Caps
- * - Localized Charring & Crevice Embers (only on burning surfaces)
  * - 1-Pixel Cel-Art Outlines via G-Buffer Discontinuity
- * - Dynamic Half-Lambert Point-Light Wrap Illumination
- * - 3D Convective Fire Interleaving with Depth Buffer
- * - Falling Sand Ash Flakes & Rising 3D Sparks
- * - ANSI 24-bit TrueColor Half-Block Character Output ('▀', '▄')
+ * - ANSI 24-bit TrueColor Half-Block Character Output ('▀', '▄') with terminal transparency
  */
 
 #define _POSIX_C_SOURCE 200809L
@@ -37,6 +38,8 @@
 #define MAX_SPARKS 256
 #define MAX_ASH_FLAKES 128
 #define MAX_LOGS 16
+#define MAX_STONES 16
+#define NUM_LOG_SEGS 10
 
 typedef struct {
     uint8_t r, g, b;
@@ -44,7 +47,7 @@ typedef struct {
 
 static const RGB COLOR_BLACK = {0, 0, 0};
 
-// Curated Natural Oak & Pine Bark Palette (No artificial orange stripes!)
+// Natural Oak & Pine Bark Palette (No orange neon stripes!)
 static const RGB PALETTE_WOOD[] = {
     {20, 12, 8},      // 0: Dark Outline / Deep crevice
     {42, 27, 18},     // 1: Deep shadow bark (raw umber)
@@ -52,16 +55,26 @@ static const RGB PALETTE_WOOD[] = {
     {105, 72, 48},    // 3: Mid oak bark
     {138, 96, 64},    // 4: Warm dry timber fiber
     {168, 120, 82},   // 5: Muted wood highlight
-    {200, 145, 102}   // 6: Warm firelit rim (natural, NOT neon orange!)
+    {200, 145, 102}   // 6: Warm firelit rim
 };
 
-// Charcoal and Carbonized Bark
+// Charcoal and Carbonized Black Bark
 static const RGB PALETTE_CHARRED[] = {
-    {16, 12, 12},     // 0: Deep black crevice
-    {30, 26, 26},     // 1: Charred black bark
-    {52, 48, 48},     // 2: Dark charcoal
-    {80, 72, 68},     // 3: Burnt ash bark
-    {115, 110, 108}   // 4: Light ash surface
+    {14, 10, 10},     // 0: Deep black crevice
+    {26, 22, 22},     // 1: Charred black bark
+    {46, 42, 42},     // 2: Dark charcoal
+    {68, 62, 60},     // 3: Burnt grey bark
+    {95, 88, 86}      // 4: Ash surface
+};
+
+// Granite & Basalt Stone Ring Palette
+static const RGB PALETTE_STONE[] = {
+    {18, 16, 14},     // 0: Stone outline / deep shade
+    {42, 38, 35},     // 1: Dark basalt
+    {68, 62, 58},     // 2: Mid granite grey
+    {96, 88, 82},     // 3: Weathered mineral rock
+    {128, 115, 102},  // 4: Warm firelit stone face
+    {165, 145, 122}   // 5: Bright fire reflection
 };
 
 // End-cap cut face with concentric tree rings
@@ -84,11 +97,11 @@ static const RGB PALETTE_EMBERS[] = {
 
 // Ash & Charcoal (Charred crust -> Dark ash -> Chalky light ash)
 static const RGB PALETTE_ASH[] = {
-    {48, 45, 52},     // 0: Charcoal crust
-    {88, 84, 94},     // 1: Dark ash
-    {135, 132, 142},  // 2: Mid ash grey
-    {185, 182, 192},  // 3: Light chalky ash
-    {230, 228, 235}   // 4: White ash powder
+    {38, 35, 42},     // 0: Charcoal crust
+    {68, 64, 74},     // 1: Dark ash
+    {115, 112, 122},  // 2: Mid ash grey
+    {165, 162, 172},  // 3: Light chalky ash
+    {210, 208, 218}   // 4: White ash powder
 };
 
 typedef struct {
@@ -96,17 +109,30 @@ typedef struct {
 } Vec3;
 
 typedef struct {
+    float temp;            // [0.0, 1.0]
+    float burn_progress;   // [0.0, 1.0] (0.0=fresh, 0.4=charred black, 0.75=ash, 1.0=disintegrated)
+    float structural_mass; // [1.0, 0.0]
+} LogSegment;
+
+typedef struct {
     int obj_id;
     Vec3 p1, p2;                       // Current geometry
     Vec3 p1_orig, p2_orig;             // Initial stack geometry
     Vec3 p1_collapsed, p2_collapsed;   // Physical collapse target under gravity
     float radius;
-    float charred;                     // Susceptibility to burning/charring
+    float charred;
     float wood_health;
     float ash_amount;
     Vec3 axis, dir, tangent, bitangent;
     float length;
+    LogSegment segments[NUM_LOG_SEGS];
 } Cylinder3D;
+
+typedef struct {
+    int obj_id;
+    Vec3 center;
+    float radius;
+} Stone3D;
 
 typedef struct {
     Vec3 pos;
@@ -161,6 +187,10 @@ static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 static Cylinder3D g_logs[MAX_LOGS];
 static int g_num_logs = 6;
 static int g_stack_mode = 0; // 0: Log Cabin (Fogueira Quadrada), 1: Teepee (Tenda Cônica), 2: Pyramid (Lean-to)
+
+// 3D Stone Fire Ring (Base da Fogueira)
+static Stone3D g_stones[MAX_STONES];
+static int g_num_stones = 10;
 
 // 3D Camera State
 static float g_cam_yaw = 0.40f;       // Horizontal orbit angle (radians, ~23 deg)
@@ -246,6 +276,11 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->charred = charred;
     c->wood_health = 100.0f;
     c->ash_amount = 0.0f;
+    for (int s = 0; s < NUM_LOG_SEGS; s++) {
+        c->segments[s].temp = 0.0f;
+        c->segments[s].burn_progress = 0.0f;
+        c->segments[s].structural_mass = 1.0f;
+    }
     recompute_cylinder_axes(c);
 }
 
@@ -307,6 +342,43 @@ static void update_dimensions(void) {
 }
 
 // -----------------------------------------------------------------------------
+// 3D STONE FIRE RING: Authentic circular containment base on the ground
+// -----------------------------------------------------------------------------
+static void build_stone_ring(void) {
+    float ground_y = -4.2f;
+    g_num_stones = 10;
+    float ring_r = 7.0f;
+    for (int i = 0; i < g_num_stones; i++) {
+        float angle = i * (2.0f * (float)M_PI / (float)g_num_stones) + 0.15f;
+        float sr = 0.95f + 0.20f * sinf(i * 3.7f);
+        Vec3 c = {
+            ring_r * cosf(angle),
+            ground_y + sr * 0.82f,
+            ring_r * sinf(angle)
+        };
+        g_stones[i].obj_id = 100 + i;
+        g_stones[i].center = c;
+        g_stones[i].radius = sr;
+    }
+}
+
+static bool intersect_sphere(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+    Vec3 oc = vec3_sub(ro, st->center);
+    float b = vec3_dot(oc, rd);
+    float c = vec3_dot(oc, oc) - st->radius * st->radius;
+    float disc = b * b - c;
+    if (disc < 0.0f) return false;
+    float sdisc = sqrtf(disc);
+    float t = -b - sdisc;
+    if (t < 0.1f) t = -b + sdisc;
+    if (t < 0.1f) return false;
+    *out_t = t;
+    *out_pt = vec3_add(ro, vec3_scale(rd, t));
+    *out_norm = vec3_norm(vec3_sub(*out_pt, st->center));
+    return true;
+}
+
+// -----------------------------------------------------------------------------
 // STACK GENERATORS: Real physical contact points, resting tiers, and gravity
 // -----------------------------------------------------------------------------
 
@@ -335,11 +407,11 @@ static void build_stack_log_cabin(void) {
     float y2_coll = ground_y + r2;   // When base burns out, drops to ground
     init_cylinder(&g_logs[2], 3,
                   (Vec3){-span, y2, -5.0f}, (Vec3){-span, y2, 5.0f},
-                  (Vec3){-span, y2_coll, -4.6f}, (Vec3){-span, y2_coll, 4.6f},
+                  (Vec3){-span, y2_coll, -4.5f}, (Vec3){-span, y2_coll, 4.5f},
                   r2, 0.40f);
     init_cylinder(&g_logs[3], 4,
                   (Vec3){ span, y2, -5.0f}, (Vec3){ span, y2, 5.0f},
-                  (Vec3){ span, y2_coll, -4.6f}, (Vec3){ span, y2_coll, 4.6f},
+                  (Vec3){ span, y2_coll, -4.5f}, (Vec3){ span, y2_coll, 4.5f},
                   r2, 0.40f);
 
     // Tier 3 (Cross diagonally across top): 2 logs
@@ -368,7 +440,7 @@ static void build_stack_teepee(void) {
         float angle = (i * 2.0f * (float)M_PI / 5.0f) + 0.3f;
         Vec3 p1 = {base_r * cosf(angle), ground_y + r, base_r * sinf(angle)};
         Vec3 p2 = {apex_r * cosf(angle), apex_y, apex_r * sinf(angle)};
-        // Collapses inward toward ground
+        // Collapses inward toward center hearth
         Vec3 p2_coll = {apex_r * 0.4f * cosf(angle), ground_y + r + 0.4f, apex_r * 0.4f * sinf(angle)};
         init_cylinder(&g_logs[i], i + 1, p1, p2, p1, p2_coll, r, 0.45f);
     }
@@ -420,6 +492,8 @@ static void init_scene(void) {
     g_collapse_progress = 0.0f;
     g_force_collapse = false;
 
+    build_stone_ring();
+
     if (g_stack_mode == 0) {
         build_stack_log_cabin();
     } else if (g_stack_mode == 1) {
@@ -427,21 +501,17 @@ static void init_scene(void) {
     } else {
         build_stack_pyramid();
     }
-
-    int cx = g_pixel_w / 2;
-    int cradle_y = (int)(g_pixel_h * 0.72f);
-    g_fire_heat[cradle_y][cx] = 0.65f;
-    g_fire_heat[cradle_y][cx - 1] = 0.50f;
-    g_fire_heat[cradle_y][cx + 1] = 0.50f;
 }
 
 static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                                float *out_t, Vec3 *out_pt, Vec3 *out_norm,
-                               float *out_u, float *out_v, bool *out_endcap, float *out_rf) {
+                               float *out_u, float *out_v, bool *out_endcap, float *out_rf,
+                               int *out_seg_idx) {
     float best_t = 1e9f;
     bool hit = false;
-    Vec3 best_pt, best_norm;
+    Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
     float best_u = 0, best_v = 0, best_rf = 1.0f;
+    int best_seg = 0;
     bool is_cap = false;
 
     // Tube Body
@@ -469,11 +539,16 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                     float angle = atan2f(vec3_dot(norm, c->bitangent), vec3_dot(norm, c->tangent));
                     float u = (angle + (float)M_PI) / (2.0f * (float)M_PI);
 
+                    int seg = (int)(v * NUM_LOG_SEGS);
+                    if (seg < 0) seg = 0;
+                    if (seg >= NUM_LOG_SEGS) seg = NUM_LOG_SEGS - 1;
+
                     best_t = t;
                     best_pt = pt;
                     best_norm = norm;
                     best_u = u;
                     best_v = v;
+                    best_seg = seg;
                     is_cap = false;
                     hit = true;
                 }
@@ -495,6 +570,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                 best_u = 0.0f;
                 best_v = 0.0f;
                 best_rf = r / c->radius;
+                best_seg = 0;
                 is_cap = true;
                 hit = true;
             }
@@ -515,6 +591,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                 best_u = 0.0f;
                 best_v = 1.0f;
                 best_rf = r / c->radius;
+                best_seg = NUM_LOG_SEGS - 1;
                 is_cap = true;
                 hit = true;
             }
@@ -529,6 +606,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
         *out_v = best_v;
         *out_endcap = is_cap;
         *out_rf = best_rf;
+        *out_seg_idx = best_seg;
     }
     return hit;
 }
@@ -576,44 +654,114 @@ static void update_simulation(void) {
         if (g_cam_yaw > 2.0f * (float)M_PI) g_cam_yaw -= 2.0f * (float)M_PI;
     }
 
-    // 7-Stage Combustion Intensity Curve
-    float intensity = 1.0f;
-    if (g_sim_time < 12.0f) {
-        intensity = 0.20f + (g_sim_time / 12.0f) * 0.35f;
-    } else if (g_sim_time < 35.0f) {
-        intensity = 0.55f + ((g_sim_time - 12.0f) / 23.0f) * 0.45f;
-    } else if (g_sim_time < 85.0f) {
-        intensity = 1.0f; // Peak Roaring Fire
-    } else if (g_sim_time < 125.0f) {
-        intensity = 0.88f; // Ashening
-    } else if (g_sim_time < 155.0f) {
-        intensity = 0.65f; // Structural Collapse
-    } else if (g_sim_time < 200.0f) {
-        intensity = 0.35f; // Ember Bed
-    } else {
-        float fade = (g_sim_time - 200.0f) / 45.0f;
-        intensity = fmaxf(0.0f, 0.22f - fade * 0.22f); // Cold Ash Mound
+    // -------------------------------------------------------------------------
+    // PHYSICAL WOOD SEGMENT PROPAGATION (NO FAKE FLOOR FIRE!)
+    // -------------------------------------------------------------------------
+    // Center kindling nest position:
+    Vec3 kindle_pos = (Vec3){0.0f, -2.6f, 0.0f};
+    float kindle_heat = 0.0f;
+    if (g_sim_time < 22.0f) {
+        kindle_heat = fmaxf(0.0f, 1.0f - (g_sim_time / 22.0f));
     }
 
-    // Physical Rotational Gravity Collapse around grounded base pivots!
-    if ((g_sim_time > 115.0f || g_force_collapse) && g_collapse_progress < 1.0f) {
-        g_collapse_progress += 0.015f * g_time_scale;
-        if (g_collapse_progress > 1.0f) g_collapse_progress = 1.0f;
+    // Update each log segment
+    for (int i = 0; i < g_num_logs; i++) {
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+            Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
 
-        float c = g_collapse_progress;
-        for (int i = 0; i < g_num_logs; i++) {
-            g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
-            g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
-            g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+            // Heat from initial kindling nest
+            if (kindle_heat > 0.05f) {
+                float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
+                float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.6f);
+                if (d_surf < 2.8f) {
+                    g_logs[i].segments[s].temp += 0.015f * (1.0f - d_surf / 2.8f) * kindle_heat * g_time_scale;
+                }
+            }
 
-            g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
-            g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
-            g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
-            recompute_cylinder_axes(&g_logs[i]);
+            // Cross-log fire radiation from burning segments
+            for (int j = 0; j < g_num_logs; j++) {
+                if (i == j) continue;
+                for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
+                    if (g_logs[j].segments[sj].temp > 0.35f) {
+                        float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
+                        Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
+                        float d_cross = vec3_len(vec3_sub(seg_p, pj));
+                        float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
+                        if (d_cross_surf < 1.8f) {
+                            g_logs[i].segments[s].temp += 0.005f * (1.0f - d_cross_surf / 1.8f) * g_time_scale;
+                        }
+                    }
+                }
+            }
+
+            // Internal conduction along wood grain
+            float cur = g_logs[i].segments[s].temp;
+            float prev_t = (s > 0) ? g_logs[i].segments[s-1].temp : cur;
+            float next_t = (s < NUM_LOG_SEGS - 1) ? g_logs[i].segments[s+1].temp : cur;
+            if (prev_t > 0.35f || next_t > 0.35f) {
+                g_logs[i].segments[s].temp += 0.0035f * g_time_scale;
+            }
+
+            // If temperature exceeds ignition threshold, start burning!
+            if (g_logs[i].segments[s].temp > 0.35f) {
+                g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + 0.004f * g_time_scale);
+                g_logs[i].segments[s].burn_progress += 0.00045f * g_time_scale;
+                g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.15f);
+
+                // Shed ash flakes as segment crumbles
+                if (g_logs[i].segments[s].burn_progress > 0.65f && rand_f() < 0.06f) {
+                    Vec3 ash_p = seg_p;
+                    ash_p.y += g_logs[i].radius * 0.9f;
+                    Vec3 vel = (Vec3){(rand_f() - 0.5f) * 0.5f + g_wind * 0.4f, -(rand_f() * 0.4f + 0.2f), (rand_f() - 0.5f) * 0.5f};
+                    spawn_ash_3d(ash_p, vel, PALETTE_ASH[rand_range(1, 3)]);
+                }
+            }
+
+            // Depletion after heavy burning (turns to ash embers)
+            if (g_logs[i].segments[s].burn_progress > 0.85f) {
+                g_logs[i].segments[s].temp = fmaxf(0.15f, g_logs[i].segments[s].temp - 0.001f * g_time_scale);
+            }
         }
     }
 
-    // Compute Camera Vectors for 3D world projection
+    // -------------------------------------------------------------------------
+    // SELF-COLLAPSE PHYSICS: When wood segments lose mass, logs sag and collapse
+    // -------------------------------------------------------------------------
+    float total_mass = 0.0f;
+    int total_segs = g_num_logs * NUM_LOG_SEGS;
+    for (int i = 0; i < g_num_logs; i++) {
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            total_mass += g_logs[i].segments[s].structural_mass;
+        }
+    }
+    float avg_mass = total_mass / (float)total_segs;
+    float collapse_factor = fmaxf(0.0f, 1.0f - avg_mass);
+    if (g_force_collapse) collapse_factor = 1.0f;
+
+    for (int i = 0; i < g_num_logs; i++) {
+        float log_mass = 0.0f;
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            log_mass += g_logs[i].segments[s].structural_mass;
+        }
+        float log_loss = 1.0f - (log_mass / (float)NUM_LOG_SEGS);
+        float c = fmaxf(collapse_factor * 0.75f, log_loss);
+        if (g_force_collapse) c = 1.0f;
+        if (c > 1.0f) c = 1.0f;
+
+        g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
+        g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
+        g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+
+        g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
+        g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
+        g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
+        recompute_cylinder_axes(&g_logs[i]);
+    }
+
+    // -------------------------------------------------------------------------
+    // STRICT FIRE PROJECTION: Heat originates strictly from burning wood
+    // -------------------------------------------------------------------------
     Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
     float cam_dist = 28.0f;
     Vec3 cam_pos = (Vec3){
@@ -629,67 +777,65 @@ static void update_simulation(void) {
     float world_w = 22.0f;
     float world_h = 14.0f;
 
-    // Projected screen positions for 3D fire emitters
-    Vec3 left_spire_w = (Vec3){-1.2f, -1.6f, 0.4f};
-    Vec3 right_spire_w = (Vec3){1.0f, -1.6f, -0.2f};
-    Vec3 core_w = (Vec3){0.0f, -1.8f, 0.0f};
+    // Reset next fire frame
+    memset(g_next_fire, 0, sizeof(g_next_fire));
 
-    Vec3 rel_l = vec3_sub(left_spire_w, cam_pos);
-    Vec3 rel_r = vec3_sub(right_spire_w, cam_pos);
-    Vec3 rel_c = vec3_sub(core_w, cam_pos);
+    // 1. Kindling flame (early stage only)
+    if (kindle_heat > 0.05f) {
+        Vec3 rel_k = vec3_sub(kindle_pos, cam_pos);
+        int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
+        int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
+        float kz = vec3_dot(rel_k, fwd);
 
-    float left_spire_x = ((vec3_dot(rel_l, right) / world_w) + 0.5f) * g_pixel_w;
-    float right_spire_x = ((vec3_dot(rel_r, right) / world_w) + 0.5f) * g_pixel_w;
-    float cx = ((vec3_dot(rel_c, right) / world_w) + 0.5f) * g_pixel_w;
+        for (int dy = -3; dy <= 2; dy++) {
+            for (int dx = -3; dx <= 3; dx++) {
+                int px = kx + dx;
+                int py = ky + dy;
+                if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                    float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
+                    if (d < 3.2f) {
+                        float h = kindle_heat * 0.85f * (1.0f - d / 3.2f);
+                        g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
+                        g_fire_z[py][px] = kz - 0.25f;
+                    }
+                }
+            }
+        }
+    }
 
-    int cradle_y = (int)((0.5f - (vec3_dot(rel_c, up) / world_h)) * g_pixel_h);
-    if (cradle_y < 10) cradle_y = 10;
-    if (cradle_y > g_pixel_h - 4) cradle_y = g_pixel_h - 4;
-
-    // =========================================================================
-    // FIRE INJECTION: Emanates from the BURNING WOOD & CRADLE
-    // =========================================================================
-    // 1. Heat emitted from contact surfaces of the burning logs
+    // 2. Heat anchored exclusively to burning wood segments!
     for (int i = 0; i < g_num_logs; i++) {
-        if (intensity < 0.15f) continue;
-        int num_pts = (int)(g_logs[i].length * 6.0f);
-        for (int s = 0; s < num_pts; s++) {
-            float t = (float)s / num_pts;
-            Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            float temp = g_logs[i].segments[s].temp;
+            if (temp > 0.40f) {
+                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+                Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                Vec3 rel_p = vec3_sub(p, cam_pos);
+                int px = (int)(((vec3_dot(rel_p, right) / world_w) + 0.5f) * g_pixel_w);
+                int py = (int)((0.5f - (vec3_dot(rel_p, up) / world_h)) * g_pixel_h);
+                float pz = vec3_dot(rel_p, fwd);
 
-            float dist_to_c = sqrtf(p.x * p.x + (p.y + 1.8f) * (p.y + 1.8f) + p.z * p.z);
-            if (dist_to_c < 4.5f) {
-                Vec3 p_rel = vec3_sub(p, cam_pos);
-                int gx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
-                int gy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
-                if (gx >= 0 && gx < g_pixel_w && gy >= 0 && gy < g_pixel_h) {
-                    float wood_fire = (0.92f - (dist_to_c / 4.5f) * 0.25f) * intensity;
-                    g_fire_heat[gy][gx] = fmaxf(g_fire_heat[gy][gx], wood_fire);
-                    g_fire_z[gy][gx] = vec3_dot(p_rel, fwd) - 0.25f;
+                float flame_h = temp * 0.95f;
+                for (int dy = -3; dy <= 1; dy++) {
+                    for (int dx = -3; dx <= 3; dx++) {
+                        int sx = px + dx;
+                        int sy = py + dy;
+                        if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                            float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
+                            if (d < 3.0f) {
+                                float val = flame_h * (1.0f - d / 3.0f);
+                                g_fire_heat[sy][sx] = fmaxf(g_fire_heat[sy][sx], val);
+                                g_fire_z[sy][sx] = pz - 0.25f;
+                            }
+                        }
+                    }
                 }
             }
         }
     }
 
-    // 2. Glowing white-hot ember bed nestled inside the cradle
-    for (int dy = -4; dy <= 4; dy++) {
-        for (int dx = -14; dx <= 14; dx++) {
-            float d = sqrtf((dx * 0.75f) * (dx * 0.75f) + (dy * 1.8f) * (dy * 1.8f));
-            if (d < 12.0f) {
-                float h = (1.0f - powf(d / 12.0f, 1.8f)) * intensity;
-                int gx = (int)cx + dx;
-                int gy = cradle_y + dy;
-                if (gx >= 0 && gx < g_pixel_w && gy >= 0 && gy < g_pixel_h) {
-                    g_fire_heat[gy][gx] = fmaxf(g_fire_heat[gy][gx], h);
-                    g_fire_z[gy][gx] = vec3_dot(rel_c, fwd) - 0.4f;
-                }
-            }
-        }
-    }
-
-    // 3. Convective flame propagation: ROARING SPIRES
-    for (int y = cradle_y; y >= 2; y--) {
-        float hr = (float)(cradle_y - y) / cradle_y;
+    // 3. Convective flame propagation upwards
+    for (int y = g_pixel_h - 4; y >= 2; y--) {
         for (int x = 0; x < g_pixel_w; x++) {
             int src_x = x;
             int wind_step = (g_wind > 0.35f) ? 1 : ((g_wind < -0.35f) ? -1 : 0);
@@ -699,32 +845,15 @@ static void update_simulation(void) {
             if (src_x >= g_pixel_w) src_x = g_pixel_w - 1;
 
             float below = g_fire_heat[y + 1][src_x];
-            if (below <= 0.03f) {
+            if (below <= 0.04f) {
                 g_next_fire[y][x] = 0.0f;
                 continue;
             }
 
-            float decay = 0.020f + 0.028f * rand_f();
-            float dl = fabsf((float)(x - (left_spire_x + sinf(y * 0.14f + g_sim_time) * 1.8f)));
-            float dr = fabsf((float)(x - (right_spire_x + sinf(y * 0.18f + g_sim_time) * 2.2f)));
-            float dc = fabsf((float)(x - cx));
-
-            bool is_left = (dl < 8.0f) && (hr < 0.78f);
-            bool is_right = (dr < 9.5f) && (hr < 0.94f);
-            bool is_core = (dc < 6.5f) && (hr < 0.52f);
-
-            if (is_left || is_right || is_core) {
-                decay *= 0.48f;
-            } else {
-                decay *= 2.6f;
-            }
-
+            float decay = 0.032f + 0.030f * rand_f();
             float val = fmaxf(0.0f, below - decay);
             g_next_fire[y][x] = val;
-
-            if (is_left) g_fire_z[y][x] = vec3_dot(rel_l, fwd) - 0.2f;
-            else if (is_right) g_fire_z[y][x] = vec3_dot(rel_r, fwd) - 0.2f;
-            else g_fire_z[y][x] = vec3_dot(rel_c, fwd) - 0.45f;
+            g_fire_z[y][x] = g_fire_z[y + 1][src_x] - 0.02f;
         }
     }
 
@@ -734,28 +863,20 @@ static void update_simulation(void) {
         }
     }
 
-    // 4. Wood Degradation & Ash Formation
-    for (int i = 0; i < g_num_logs; i++) {
-        if (intensity > 0.35f && g_logs[i].wood_health > 0.0f) {
-            g_logs[i].wood_health -= 0.025f * g_time_scale;
-            g_logs[i].ash_amount += 0.030f * g_time_scale;
-
-            if (rand_f() < 0.12f && g_logs[i].ash_amount > 20.0f) {
-                float t = rand_f();
-                Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
-                p.y += g_logs[i].radius * 0.9f;
-                Vec3 vel = (Vec3){(rand_f() - 0.5f) * 0.6f + g_wind * 0.4f, -(rand_f() * 0.5f + 0.2f), (rand_f() - 0.5f) * 0.6f};
-                spawn_ash_3d(p, vel, PALETTE_ASH[rand_range(1, 3)]);
+    // 4. Sparks Ejection from burning wood
+    if (rand_f() < 0.65f) {
+        // Pick a burning segment
+        for (int i = 0; i < g_num_logs; i++) {
+            int s = rand_range(0, NUM_LOG_SEGS - 1);
+            if (g_logs[i].segments[s].temp > 0.50f) {
+                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+                Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind * 1.2f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
+                RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
+                spawn_spark_3d(p, spark_v, rand_range(16, 42), spark_col);
+                break;
             }
         }
-    }
-
-    // 5. 3D Sparks Ejection
-    if (intensity > 0.30f && rand_f() < 0.70f) {
-        Vec3 spark_p = (Vec3){(rand_f() - 0.5f) * 2.5f, -1.6f, (rand_f() - 0.5f) * 2.5f};
-        Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind * 1.2f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
-        RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
-        spawn_spark_3d(spark_p, spark_v, rand_range(16, 42), spark_col);
     }
 
     for (int i = 0; i < MAX_SPARKS; i++) {
@@ -763,7 +884,7 @@ static void update_simulation(void) {
             g_sparks[i].pos.x += g_sparks[i].vel.x * 0.05f;
             g_sparks[i].pos.y += g_sparks[i].vel.y * 0.05f;
             g_sparks[i].pos.z += g_sparks[i].vel.z * 0.05f;
-            g_sparks[i].vel.y -= 0.04f; // gravity deceleration
+            g_sparks[i].vel.y -= 0.04f; // gravity
             g_sparks[i].life--;
             if (g_sparks[i].life <= 0 || g_sparks[i].pos.y < -4.5f) {
                 g_sparks[i].active = false;
@@ -771,7 +892,7 @@ static void update_simulation(void) {
         }
     }
 
-    // 6. 3D Ash Flakes drift & accumulation on ground
+    // 5. Ash Flakes drift & accumulation on ground
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
             g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.05f + sinf(g_ash_flakes[i].pos.y * 2.0f + g_sim_time) * 0.02f;
@@ -825,7 +946,7 @@ static void render_scene(void) {
     float light_intensity = 1.9f * flicker;
 
     // =========================================================================
-    // 1. 3D Raycasting with Object-Space Bark Plates (No orange stripes!)
+    // 1. 3D Raycasting with Stones and Segmented Wood
     // =========================================================================
     for (int y = 0; y < g_pixel_h; y++) {
         float wy = (((g_pixel_h - 1 - y) / (float)g_pixel_h) - 0.5f) * world_h;
@@ -836,97 +957,145 @@ static void render_scene(void) {
             Vec3 ray_dir = fwd;
 
             float closest_t = 1e9f;
-            Vec3 hit_pt = {0,0,0}, hit_norm = {0,1,0};
-            float hit_u = 0, hit_v = 0, hit_rf = 1.0f;
-            bool hit_cap = false;
+            int hit_type = 0; // 0: none, 1: stone, 2: log
+
+            // Test 3D Stone Fire Ring
+            Stone3D *hit_stone = NULL;
+            Vec3 stone_pt = {0,0,0}, stone_norm = {0,1,0};
+            for (int i = 0; i < g_num_stones; i++) {
+                float t;
+                Vec3 pt, norm;
+                if (intersect_sphere(&g_stones[i], ray_orig, ray_dir, &t, &pt, &norm)) {
+                    if (t < closest_t) {
+                        closest_t = t;
+                        stone_pt = pt;
+                        stone_norm = norm;
+                        hit_stone = &g_stones[i];
+                        hit_type = 1;
+                    }
+                }
+            }
+
+            // Test 3D Segmented Logs
             Cylinder3D *hit_log = NULL;
+            Vec3 log_pt = {0,0,0}, log_norm = {0,1,0};
+            float hit_u = 0, hit_v = 0, hit_rf = 1.0f;
+            int hit_seg = 0;
+            bool hit_cap = false;
 
             for (int i = 0; i < g_num_logs; i++) {
                 float t, u, v, rf;
                 Vec3 pt, norm;
                 bool is_cap;
-                if (intersect_cylinder(&g_logs[i], ray_orig, ray_dir, &t, &pt, &norm, &u, &v, &is_cap, &rf)) {
+                int seg;
+                if (intersect_cylinder(&g_logs[i], ray_orig, ray_dir, &t, &pt, &norm, &u, &v, &is_cap, &rf, &seg)) {
                     if (t < closest_t) {
                         closest_t = t;
-                        hit_pt = pt;
-                        hit_norm = norm;
+                        log_pt = pt;
+                        log_norm = norm;
                         hit_u = u;
                         hit_v = v;
                         hit_cap = is_cap;
                         hit_rf = rf;
+                        hit_seg = seg;
                         hit_log = &g_logs[i];
+                        hit_type = 2;
                     }
                 }
             }
 
-            if (hit_log != NULL) {
-                g_id_buf[y][x] = hit_log->obj_id;
-                g_depth_buf[y][x] = vec3_dot(vec3_sub(hit_pt, cam_pos), fwd);
+            if (hit_type == 1 && hit_stone != NULL) {
+                g_id_buf[y][x] = hit_stone->obj_id;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(stone_pt, cam_pos), fwd);
 
-                // Dynamic fire point light with wrap-lighting
-                Vec3 l_vec = vec3_sub(light_pos, hit_pt);
+                // Lighting on stone
+                Vec3 l_vec = vec3_sub(light_pos, stone_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.07f * l_dist + 0.015f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, vec3_dot(stone_norm, l_dir));
+                float ambient = 0.22f + 0.10f * fmaxf(0.0f, stone_norm.y);
+                float s_val = ndotl * atten * light_intensity * 2.2f + ambient;
+
+                float rock_noise = (sinf(stone_pt.x * 3.5f + stone_pt.z * 4.1f) * 0.5f + 0.5f) * 0.18f;
+                int s_idx = (int)((s_val + rock_noise) * 2.8f);
+                if (s_idx < 1) s_idx = 1;
+                if (s_idx > 5) s_idx = 5;
+                g_shade_buf[y][x] = PALETTE_STONE[s_idx];
+
+            } else if (hit_type == 2 && hit_log != NULL) {
+                g_id_buf[y][x] = hit_log->obj_id;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(log_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, log_pt);
                 float l_dist = vec3_len(l_vec);
                 Vec3 l_dir = vec3_norm(l_vec);
                 float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
-                
-                // Wrap lighting allows curved front of logs to catch radiant fire warmth
-                float ndotl = fmaxf(0.0f, (vec3_dot(hit_norm, l_dir) + 0.45f) / 1.45f);
-                float ambient = 0.28f + 0.12f * fmaxf(0.0f, hit_norm.y);
+                float ndotl = fmaxf(0.0f, (vec3_dot(log_norm, l_dir) + 0.45f) / 1.45f);
+                float ambient = 0.28f + 0.12f * fmaxf(0.0f, log_norm.y);
                 float light_val = (ndotl * atten * light_intensity * 2.4f + ambient);
 
+                float burn = hit_log->segments[hit_seg].burn_progress;
+                float seg_temp = hit_log->segments[hit_seg].temp;
+
                 if (hit_cap) {
-                    // Tree Rings on End-Cap
                     float r_q = floorf(hit_rf * 8.0f) / 8.0f;
                     int ring_band = ((int)(r_q * 8.0f)) % 2;
                     int col_idx = 1 + ring_band + ((hit_rf > 0.70f) ? 1 : 0) + ((light_val > 0.80f) ? 1 : 0);
                     if (col_idx > 4) col_idx = 4;
                     g_shade_buf[y][x] = PALETTE_ENDCAP[col_idx];
                 } else {
-                    // Discrete object-space bark plates (Zero Pixel Creep, no tiger stripes)
                     float num_plates_u = 14.0f;
                     float num_plates_v = hit_log->length * 2.2f;
                     float u_plate = floorf(hit_u * num_plates_u);
                     float v_plate = floorf(hit_v * num_plates_v);
 
-                    // Subtle pseudo-random plate shade variation
                     float plate_hash = sinf(u_plate * 12.9898f + v_plate * 78.233f) * 43758.5453f;
                     float plate_var = (plate_hash - floorf(plate_hash)) * 0.25f - 0.12f;
 
-                    // Discrete furrow edge test (plate boundaries are dark crevices)
                     float u_frac = (hit_u * num_plates_u) - u_plate;
                     float v_frac = (hit_v * num_plates_v) - v_plate;
                     bool is_furrow = (u_frac < 0.12f || u_frac > 0.88f || (v_frac < 0.08f && ((int)u_plate % 2 == 0)));
 
-                    // Local heat charring (based on distance to fire core and log charred factor)
-                    float dist_to_core = sqrtf(hit_pt.x * hit_pt.x + (hit_pt.y + 1.8f) * (hit_pt.y + 1.8f) + hit_pt.z * hit_pt.z);
-                    float heat_exposure = fmaxf(0.0f, 1.0f - dist_to_core / 4.8f) * hit_log->charred;
-
-                    if (hit_log->ash_amount > 40.0f) {
-                        int ash_idx = (int)((light_val + plate_var) * 2.2f);
+                    if (burn > 0.75f) {
+                        // 4. Brittle Ash Grey / Powder
+                        int ash_idx = (int)((light_val + plate_var) * 2.4f);
                         if (ash_idx < 0) ash_idx = 0;
                         if (ash_idx > 4) ash_idx = 4;
                         g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
-                    } else if (heat_exposure > 0.45f) {
-                        // Charred alligator bark with glowing ember in deep crevices
-                        if (is_furrow && heat_exposure > 0.60f) {
-                            int emb_idx = (int)(heat_exposure * 3.5f);
+                    } else if (burn > 0.40f) {
+                        // 3. Charred Black Bark with Glowing Embers in deep crevices
+                        if (is_furrow && seg_temp > 0.50f) {
+                            int emb_idx = (int)(seg_temp * 3.5f);
                             if (emb_idx < 0) emb_idx = 0;
                             if (emb_idx > 3) emb_idx = 3;
                             g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                         } else {
-                            int c_idx = (int)((light_val + plate_var) * 2.2f);
+                            int c_idx = (int)((light_val + plate_var) * 2.0f);
                             if (c_idx < 0) c_idx = 0;
                             if (c_idx > 4) c_idx = 4;
                             g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
                         }
-                    } else if (is_furrow) {
-                        g_shade_buf[y][x] = PALETTE_WOOD[0]; // Dark crevice
+                    } else if (burn > 0.15f) {
+                        // 2. Smoking / soot heated bark
+                        if (is_furrow) {
+                            g_shade_buf[y][x] = PALETTE_CHARRED[0];
+                        } else {
+                            int b_idx = (int)((light_val + plate_var) * 2.0f);
+                            if (b_idx < 1) b_idx = 1;
+                            if (b_idx > 4) b_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                        }
                     } else {
-                        // Natural weathered wood tone
-                        int b_idx = (int)((light_val + plate_var) * 2.8f);
-                        if (b_idx < 1) b_idx = 1;
-                        if (b_idx > 6) b_idx = 6;
-                        g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                        // 1. Fresh Natural Oak Wood
+                        if (is_furrow) {
+                            g_shade_buf[y][x] = PALETTE_WOOD[0];
+                        } else {
+                            int b_idx = (int)((light_val + plate_var) * 2.8f);
+                            if (b_idx < 1) b_idx = 1;
+                            if (b_idx > 6) b_idx = 6;
+                            g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                        }
                     }
                 }
             }
@@ -1214,10 +1383,12 @@ int main(int argc, char **argv) {
         g_pixel_h = 70;
         if (argc > 6) g_stack_mode = atoi(argv[6]);
         init_scene();
-        if (argc > 3) g_sim_time = atof(argv[3]);
+        float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
         if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
-        for (int i = 0; i < 40; i++) update_simulation();
+        while (g_sim_time < target_sim) {
+            update_simulation();
+        }
         render_scene();
         FILE *f = fopen(argv[2], "wb");
         if (f) {

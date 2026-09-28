@@ -178,3 +178,63 @@ $$u_{\text{plate}} = \lfloor u \times 14 \rfloor, \quad v_{\text{plate}} = \lflo
 | Fixed camera angle preventing 3D scene inspection | Orthographic rays were locked to fixed $+Z$ vector | Implemented 3D spherical orbit camera with yaw/pitch rotation, real-time keyboard controls (`←/→/↑/↓`, `WASD`), and auto-turntable mode. |
 | Unrealistic orange/red tiger stripes on wood | Trigonometric functions `sin(38*u)` and `sin(18*u + 8*v)` triggered ember palette and bright orange color bands | Replaced with discrete object-space cellular bark plates, natural oak/pine palette, and confined glowing embers strictly to fire-exposed charred crevices. |
 | Chaotic and arbitrary log stack | 4 hardcoded logs hovered and leaned unnaturally | Researched and implemented 3 classic bonfire stacking geometries (Log Cabin, Teepee, and Pyramid) with physical contact notches and gravity collapse. |
+| Fire spawning out of the ground | Residual hardcoded heat disc at floor elevation $Y = -4.2f$ | Removed floor heat injection entirely; fire anchors strictly to kindle bundle $(0, -2.6, 0)$ and burning wood segments ($T > 0.35$). |
+| Firewood burning as a single monolithic block | Single global burn progress per log caused uniform discoloration | Discretized each log into $N_{\text{seg}} = 10$ axial cells with independent heat conduction, charring, ash degradation, and mass loss. |
+| Bonfire floating on bare ground without containment | Absence of physical containment structure | Added 10 rounded 3D stones in a circular fire ring at $R = 7.0$ resting on the ground plane with stone palette and firelight reflections. |
+
+---
+
+## 9. 3D Stone Fire Ring Containment Base
+
+### Geometry
+A ring of $N_{\text{stones}} = 10$ ellipsoidal rocks encircles the hearth at radius $R_{\text{ring}} = 7.0$:
+$$\theta_i = \frac{2\pi i}{N_{\text{stones}}} + \delta\theta_i$$
+$$\vec{C}_i = \left((R_{\text{ring}} + \delta r_i) \cos\theta_i, \; Y_{\text{ground}} + R_{y, i} \cdot 0.7, \; (R_{\text{ring}} + \delta r_i) \sin\theta_i\right)$$
+
+Each stone is modeled as a flattened sphere with semi-axes $(R_x, R_y, R_z)$ where $R_y \approx 0.8 \times R_{x, z}$, sunken into the ground plane ($Y_{\text{ground}} = -4.2$).
+
+### Ray Intersection & Shading
+Rays test analytical sphere intersections:
+$$(\vec{P}_{\text{ray}} + t \hat{D} - \vec{C}) \cdot (\vec{P}_{\text{ray}} + t \hat{D} - \vec{C}) = R^2$$
+Surfaces are shaded using the discrete granite/basalt palette `PALETTE_STONE`:
+- Stepped diffuse illumination from fire core: $I_{\text{stone}} = \max(0, \hat{N} \cdot \hat{L}) \times \text{Atten} \times I_{\text{fire}} + I_{\text{ambient}}$.
+- Firelit stone highlights (`#7A6A58` to `#9E8C78`) facing inward toward the flames.
+- Dark basalt shadow tones (`#1E1C1A` to `#353230`) facing outward away from the hearth.
+- Screen-space 1-pixel discontinuity outlines separate individual adjacent stones.
+
+---
+
+## 10. Segmented Firewood Combustion & Self-Collapse
+
+![Stone Ring & Segmented Combustion Stages](media/stone_ring_c_stages.png)
+
+### 1. Longitudinal Discretization
+Each cylinder of length $L$ is divided into $N_{\text{seg}} = 10$ discrete segments along its axis $\hat{D}$:
+$$\vec{P}_{\text{seg}}(s) = \vec{P}_1 + \left(\frac{s + 0.5}{N_{\text{seg}}}\right) (\vec{P}_2 - \vec{P}_1), \quad s \in [0, N_{\text{seg}} - 1]$$
+
+Each segment maintains:
+- `temp` $\in [0, 1]$: Local thermal state.
+- `burn_progress` $\in [0, 1]$: Cumulative combustion consumption.
+- `structural_mass` $\in [0, 1]$: Remaining mechanical strength.
+
+### 2. Heat Conduction & Ignition
+1. **Kindling Contact**: At startup, central kindling at $\vec{P}_{\text{kindle}} = (0, -2.6, 0)$ transfers heat to log segments within effective surface distance $d_{\text{surf}} < 2.8$:
+   $$\Delta T_{\text{kindle}} = 0.0035 \times \left(1 - \frac{d_{\text{surf}}}{2.8}\right) \times I_{\text{kindle}}$$
+2. **Axial Conduction**: Heat diffuses along adjacent segments of the same log:
+   $$\frac{\partial T(s)}{\partial t} = k_{\text{diff}} \left(T(s - 1) - 2T(s) + T(s + 1)\right)$$
+3. **Cross-Log Proximity**: Burning segments ($T > 0.4$) radiate heat to segments on neighboring logs within proximity radius $r_{\text{contact}} < 3.2$.
+
+### 3. Progressive Material Lifecycle
+For each hit point $\vec{P}_{\text{hit}}$, the local segment index $s = \min(9, \lfloor v \cdot 10 \rfloor)$ determines the rendering state:
+
+1. **Fresh Wood ($B < 0.15$)**: Discrete bark plates with natural brown oak palette (`PALETTE_OAK`).
+2. **Smoking / Warm ($0.15 \le B < 0.35$)**: Darkened scorched bark, heat haze distortion.
+3. **Active Combustion ($0.35 \le B < 0.70$)**: Alligator charring crust (`#120B08` to `#241812`) interlaced with glowing orange ember fissures (`#E12D0A` to `#FFC830`). Segment emits convective flame particles into the fluid grid.
+4. **Brittle Ash ($0.70 \le B < 0.95$)**: Chalky grey and white mineral crust (`PALETTE_ASH`). Mass loss causes ash flakes to peel off and fall with gravity.
+5. **Disintegration ($B \ge 0.95$)**: Segment core hollows out; effective ray radius $R_{\text{eff}} = R \times \text{mass}$ shrinks to zero.
+
+### 4. Mass-Loss-Driven Structural Collapse
+When average structural mass $\bar{M} = \frac{1}{N} \sum M_i$ drops below critical stability thresholds:
+1. **Sagging ($0.45 < \bar{M} \le 0.75$)**: Top tiers sag downward, resting notches deepen.
+2. **Structural Fracture ($0.25 < \bar{M} \le 0.45$)**: Weakened segments lose cantilever support; logs rotate around ground contact points toward the central hearth floor.
+3. **Full Collapse ($\bar{M} \le 0.25$)**: All consumed logs settle flat onto ground plane ($Y = -4.2$), forming a glowing ember bed enclosed by the stone ring.

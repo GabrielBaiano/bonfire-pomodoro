@@ -4,10 +4,14 @@
 
 Features:
 - 3D Spherical Orbit Camera (Yaw θ, Pitch φ) with real-time controls & turntable
-- 3 Physical Wood Stacking Modes: Fogueira Quadrada (Log Cabin), Tenda Cônica (Teepee), Pirâmide
-- Discrete Object-Space Bark Plates (No periodic orange stripes, zero pixel creep)
+- 3D Stone Fire Ring Base (Círculo de pedras de contenção no chão)
+- Segmented Wood Combustion (10 longitudinal segments per log):
+  Fresh Wood -> Smoking -> Burning Flames -> Charred Black -> Brittle Ash
+- Zero Floor Fire: Flames originate strictly from burning wood segments and central kindling
+- Physical Self-Collapse Kinematics under gravity as structural mass burns away
+- 3 Physical Stacking Modes: Fogueira Quadrada (Log Cabin), Tenda Cônica (Teepee), Pirâmide
+- Discrete Object-Space Bark Plates (No orange tiger stripes, zero pixel creep)
 - Concentric Growth Rings on Cut End-Caps
-- Localized Charring & Crevice Embers
 - Unicode half-blocks '▀' (2 vertical pixels per cell) with terminal transparency
 """
 
@@ -28,15 +32,24 @@ PALETTE_WOOD = [
     (105, 72, 48),    # 3: Mid oak bark
     (138, 96, 64),    # 4: Warm dry timber
     (168, 120, 82),   # 5: Muted wood highlight
-    (200, 145, 102)   # 6: Warm firelit rim (natural, NOT neon orange!)
+    (200, 145, 102)   # 6: Warm firelit rim
 ]
 
 PALETTE_CHARRED = [
-    (16, 12, 12),     # 0: Black crevice
-    (30, 26, 26),     # 1: Charred black bark
-    (52, 48, 48),     # 2: Dark charcoal
-    (80, 72, 68),     # 3: Burnt ash bark
-    (115, 110, 108)   # 4: Ash surface
+    (14, 10, 10),     # 0: Pure charcoal black crevice
+    (26, 22, 22),     # 1: Charred black bark
+    (46, 42, 42),     # 2: Dark charcoal
+    (68, 62, 60),     # 3: Burnt grey bark
+    (95, 88, 86)      # 4: Ash surface
+]
+
+PALETTE_STONE = [
+    (18, 16, 14),     # 0: Stone outline / deep shade
+    (42, 38, 35),     # 1: Dark basalt
+    (68, 62, 58),     # 2: Mid granite grey
+    (96, 88, 82),     # 3: Weathered mineral rock
+    (128, 115, 102),  # 4: Warm firelit stone face
+    (165, 145, 122)   # 5: Bright fire reflection
 ]
 
 PALETTE_ENDCAP = [
@@ -56,14 +69,40 @@ PALETTE_EMBERS = [
 ]
 
 PALETTE_ASH = [
-    (48, 45, 52),     # 0: Charcoal crust
-    (88, 84, 94),     # 1: Dark ash
-    (135, 132, 142),  # 2: Mid ash grey
-    (185, 182, 192),  # 3: Light chalky ash
-    (230, 228, 235)   # 4: White ash powder
+    (38, 35, 42),     # 0: Charcoal crust
+    (68, 64, 74),     # 1: Dark ash
+    (115, 112, 122),  # 2: Mid ash grey
+    (165, 162, 172),  # 3: Light chalky ash
+    (210, 208, 218)   # 4: White ash powder
 ]
 
-class Cylinder3D:
+NUM_LOG_SEGS = 10
+
+class Stone3D:
+    def __init__(self, obj_id, center, radius):
+        self.obj_id = obj_id
+        self.center = list(center)
+        self.radius = radius
+
+    def intersect(self, ro, rd):
+        oc = [ro[0] - self.center[0], ro[1] - self.center[1], ro[2] - self.center[2]]
+        b = oc[0]*rd[0] + oc[1]*rd[1] + oc[2]*rd[2]
+        c = (oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2]) - self.radius * self.radius
+        disc = b * b - c
+        if disc < 0:
+            return None
+        sdisc = math.sqrt(disc)
+        t = -b - sdisc
+        if t < 0.1:
+            t = -b + sdisc
+        if t < 0.1:
+            return None
+        pt = [ro[0] + t * rd[0], ro[1] + t * rd[1], ro[2] + t * rd[2]]
+        inv_r = 1.0 / self.radius
+        norm = [(pt[0] - self.center[0]) * inv_r, (pt[1] - self.center[1]) * inv_r, (pt[2] - self.center[2]) * inv_r]
+        return t, pt, norm
+
+class SegmentedCylinder3D:
     def __init__(self, obj_id, p1, p2, p1_collapsed, p2_collapsed, radius, charred=0.3):
         self.obj_id = obj_id
         self.p1 = list(p1)
@@ -74,8 +113,9 @@ class Cylinder3D:
         self.p2_collapsed = list(p2_collapsed)
         self.radius = radius
         self.charred = charred
-        self.wood_health = 100.0
-        self.ash_amount = 0.0
+        self.temp = [0.0 for _ in range(NUM_LOG_SEGS)]
+        self.burn_progress = [0.0 for _ in range(NUM_LOG_SEGS)]
+        self.structural_mass = [1.0 for _ in range(NUM_LOG_SEGS)]
         self.recompute()
 
     def recompute(self):
@@ -137,8 +177,9 @@ class Cylinder3D:
                         dot_bit = norm[0]*self.bitangent[0] + norm[1]*self.bitangent[1] + norm[2]*self.bitangent[2]
                         angle = math.atan2(dot_bit, dot_tan)
                         u = (angle + math.pi) / (2.0 * math.pi)
+                        seg = min(NUM_LOG_SEGS - 1, max(0, int(v * NUM_LOG_SEGS)))
                         best_t = t
-                        best_res = (t, pt, norm, u, v, False, 1.0)
+                        best_res = (t, pt, norm, u, v, False, 1.0, seg)
 
         # Cap 1 (-dir)
         denom1 = rd[0]*(-self.dir[0]) + rd[1]*(-self.dir[1]) + rd[2]*(-self.dir[2])
@@ -150,7 +191,7 @@ class Cylinder3D:
                 dist_r = math.sqrt((pt[0]-self.p1[0])**2 + (pt[1]-self.p1[1])**2 + (pt[2]-self.p1[2])**2)
                 if dist_r <= self.radius:
                     best_t = t_cap
-                    best_res = (t_cap, pt, [-self.dir[0], -self.dir[1], -self.dir[2]], 0.0, 0.0, True, dist_r/self.radius)
+                    best_res = (t_cap, pt, [-self.dir[0], -self.dir[1], -self.dir[2]], 0.0, 0.0, True, dist_r/self.radius, 0)
 
         # Cap 2 (+dir)
         denom2 = rd[0]*self.dir[0] + rd[1]*self.dir[1] + rd[2]*self.dir[2]
@@ -162,9 +203,24 @@ class Cylinder3D:
                 dist_r = math.sqrt((pt[0]-self.p2[0])**2 + (pt[1]-self.p2[1])**2 + (pt[2]-self.p2[2])**2)
                 if dist_r <= self.radius:
                     best_t = t_cap
-                    best_res = (t_cap, pt, [self.dir[0], self.dir[1], self.dir[2]], 0.0, 1.0, True, dist_r/self.radius)
+                    best_res = (t_cap, pt, [self.dir[0], self.dir[1], self.dir[2]], 0.0, 1.0, True, dist_r/self.radius, NUM_LOG_SEGS - 1)
 
         return best_res
+
+# 3D Stone Fire Ring Generator
+def build_stone_ring():
+    ground_y = -4.2
+    stones = []
+    num_stones = 10
+    ring_radius = 7.0
+    for i in range(num_stones):
+        angle = i * (2.0 * math.pi / num_stones) + 0.15
+        sx = ring_radius * math.cos(angle)
+        sz = ring_radius * math.sin(angle)
+        sr = 0.95 + 0.20 * math.sin(i * 3.7)
+        sy = ground_y + sr * 0.82
+        stones.append(Stone3D(100 + i, [sx, sy, sz], sr))
+    return stones
 
 # Stacking generator functions
 def get_stack_log_cabin():
@@ -178,12 +234,12 @@ def get_stack_log_cabin():
     y3_coll = ground_y + r3 + 0.3
 
     return [
-        Cylinder3D(1, [-5.0, y1, -span], [5.0, y1, -span], [-5.0, y1, -span], [5.0, y1, -span], r1, 0.25),
-        Cylinder3D(2, [-5.0, y1,  span], [5.0, y1,  span], [-5.0, y1,  span], [5.0, y1,  span], r1, 0.25),
-        Cylinder3D(3, [-span, y2, -5.0], [-span, y2, 5.0], [-span, y2_coll, -4.6], [-span, y2_coll, 4.6], r2, 0.40),
-        Cylinder3D(4, [ span, y2, -5.0], [ span, y2, 5.0], [ span, y2_coll, -4.6], [ span, y2_coll, 4.6], r2, 0.40),
-        Cylinder3D(5, [-4.0, y3, -3.0], [4.0, y3, 3.0], [-2.5, y3_coll, -1.8], [2.5, y3_coll, 1.8], r3, 0.60),
-        Cylinder3D(6, [-4.0, y3,  3.0], [4.0, y3, -3.0], [-2.5, y3_coll,  1.8], [2.5, y3_coll, -1.8], r3, 0.60),
+        SegmentedCylinder3D(1, [-5.0, y1, -span], [5.0, y1, -span], [-5.0, y1, -span], [5.0, y1, -span], r1, 0.25),
+        SegmentedCylinder3D(2, [-5.0, y1,  span], [5.0, y1,  span], [-5.0, y1,  span], [5.0, y1,  span], r1, 0.25),
+        SegmentedCylinder3D(3, [-span, y2, -5.0], [-span, y2, 5.0], [-span, y2_coll, -4.5], [-span, y2_coll, 4.5], r2, 0.40),
+        SegmentedCylinder3D(4, [ span, y2, -5.0], [ span, y2, 5.0], [ span, y2_coll, -4.5], [ span, y2_coll, 4.5], r2, 0.40),
+        SegmentedCylinder3D(5, [-4.0, y3, -3.0], [4.0, y3, 3.0], [-2.5, y3_coll, -1.8], [2.5, y3_coll, 1.8], r3, 0.60),
+        SegmentedCylinder3D(6, [-4.0, y3,  3.0], [4.0, y3, -3.0], [-2.5, y3_coll,  1.8], [2.5, y3_coll, -1.8], r3, 0.60),
     ]
 
 def get_stack_teepee():
@@ -198,7 +254,7 @@ def get_stack_teepee():
         p1 = [base_r * math.cos(angle), ground_y + r, base_r * math.sin(angle)]
         p2 = [apex_r * math.cos(angle), apex_y, apex_r * math.sin(angle)]
         p2_coll = [apex_r * 0.4 * math.cos(angle), ground_y + r + 0.4, apex_r * 0.4 * math.sin(angle)]
-        logs.append(Cylinder3D(i + 1, p1, p2, p1, p2_coll, r, 0.45))
+        logs.append(SegmentedCylinder3D(i + 1, p1, p2, p1, p2_coll, r, 0.45))
     return logs
 
 def get_stack_pyramid():
@@ -210,11 +266,11 @@ def get_stack_pyramid():
     y_coll = ground_y + r_cross + 0.2
 
     return [
-        Cylinder3D(1, [-5.5, y1, -2.5], [5.5, y1, -2.5], [-5.5, y1, -2.5], [5.5, y1, -2.5], r_base, 0.25),
-        Cylinder3D(2, [-5.5, y1,  2.5], [5.5, y1,  2.5], [-5.5, y1,  2.5], [5.5, y1,  2.5], r_base, 0.25),
-        Cylinder3D(3, [-4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [-4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
-        Cylinder3D(4, [ 4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [ 4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
-        Cylinder3D(5, [ 0.0, y1 + r_base - 0.2,  3.0], [0.0, y_apex,  0.4], [ 0.0, y_coll,  2.4], [0.0, y_coll,  0.2], r_cross, 0.50),
+        SegmentedCylinder3D(1, [-5.5, y1, -2.5], [5.5, y1, -2.5], [-5.5, y1, -2.5], [5.5, y1, -2.5], r_base, 0.25),
+        SegmentedCylinder3D(2, [-5.5, y1,  2.5], [5.5, y1,  2.5], [-5.5, y1,  2.5], [5.5, y1,  2.5], r_base, 0.25),
+        SegmentedCylinder3D(3, [-4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [-4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
+        SegmentedCylinder3D(4, [ 4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [ 4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
+        SegmentedCylinder3D(5, [ 0.0, y1 + r_base - 0.2,  3.0], [0.0, y_apex,  0.4], [ 0.0, y_coll,  2.4], [0.0, y_coll,  0.2], r_cross, 0.50),
     ]
 
 def main():
@@ -241,6 +297,8 @@ def main():
     pw = min(cols, 120)
     ph = min((rows - 2) * 2, 70)
 
+    stones = build_stone_ring()
+
     stack_mode = 0 # 0: Log Cabin, 1: Teepee, 2: Pyramid
     stack_funcs = [get_stack_log_cabin, get_stack_teepee, get_stack_pyramid]
     logs = stack_funcs[stack_mode]()
@@ -249,11 +307,9 @@ def main():
     time_scale = 1.0
     wind = 0.0
     wind_tgt = 0.0
-    collapse = 0.0
     force_collapse = False
     paused = False
 
-    # Camera Orbit Parameters
     cam_yaw = 0.40
     cam_pitch = 0.35
     auto_turntable = False
@@ -265,11 +321,6 @@ def main():
 
     sparks = []
     ash_flakes = []
-
-    # Initial ignition
-    cradle_y = int(ph * 0.72)
-    cx = pw // 2
-    fire_heat[cradle_y][cx] = 0.65
 
     while True:
         try:
@@ -286,7 +337,6 @@ def main():
         except Exception:
             pass
 
-        # Handle non-blocking keyboard input
         while True:
             r, _, _ = select.select([sys.stdin], [], [], 0)
             if not r:
@@ -299,13 +349,13 @@ def main():
                     if not r2: break
                     seq += sys.stdin.read(1)
                     if len(seq) >= 2: break
-                if seq == "[A": # Up arrow -> pitch up
+                if seq == "[A":
                     cam_pitch = min(1.25, cam_pitch + 0.06)
-                elif seq == "[B": # Down arrow -> pitch down
+                elif seq == "[B":
                     cam_pitch = max(-0.15, cam_pitch - 0.06)
-                elif seq == "[C": # Right arrow -> yaw right
+                elif seq == "[C":
                     cam_yaw += 0.08
-                elif seq == "[D": # Left arrow -> yaw left
+                elif seq == "[D":
                     cam_yaw -= 0.08
             elif ch in ('a', 'A', 'h'):
                 cam_yaw -= 0.08
@@ -319,13 +369,11 @@ def main():
                 stack_mode = (stack_mode + 1) % 3
                 logs = stack_funcs[stack_mode]()
                 sim_time = 0.0
-                collapse = 0.0
                 force_collapse = False
                 fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
                 sparks.clear()
                 ash_flakes.clear()
-                fire_heat[int(ph * 0.72)][pw // 2] = 0.65
             elif ch in ('t', 'T'):
                 auto_turntable = not auto_turntable
             elif ch in ('0', 'z', 'Z'):
@@ -336,14 +384,12 @@ def main():
                 cleanup()
             elif ch in ('r', 'R'):
                 sim_time = 0.0
-                collapse = 0.0
                 force_collapse = False
                 logs = stack_funcs[stack_mode]()
                 fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
                 sparks.clear()
                 ash_flakes.clear()
-                fire_heat[int(ph * 0.72)][pw // 2] = 0.65
             elif ch in ('c', 'C'):
                 force_collapse = True
             elif ch == ' ':
@@ -363,34 +409,59 @@ def main():
                 wind_tgt = (random.random() - 0.5) * 1.8
             wind += (wind_tgt - wind) * 0.04
 
-            # Combustion intensity
-            if sim_time < 12.0:
-                intensity = 0.20 + (sim_time / 12.0) * 0.35
-            elif sim_time < 35.0:
-                intensity = 0.55 + ((sim_time - 12.0) / 23.0) * 0.45
-            elif sim_time < 85.0:
-                intensity = 1.0
-            elif sim_time < 125.0:
-                intensity = 0.88
-            elif sim_time < 155.0:
-                intensity = 0.65
-            elif sim_time < 200.0:
-                intensity = 0.35
-            else:
-                fade = (sim_time - 200.0) / 45.0
-                intensity = max(0.0, 0.22 - fade * 0.22)
+            # -------------------------------------------------------------
+            # WOOD COMBUSTION SIMULATION (ZERO FLOOR FIRE!)
+            # -------------------------------------------------------------
+            kindle_pos = [0.0, -2.6, 0.0]
+            kindle_heat = max(0.0, 1.0 - (sim_time / 22.0)) if sim_time < 22.0 else 0.0
 
-            # Physical gravity collapse
-            if (sim_time > 115.0 or force_collapse) and collapse < 1.0:
-                collapse = min(1.0, collapse + 0.015 * time_scale)
-                for l in logs:
-                    l.p1[0] = l.p1_orig[0] * (1.0 - collapse) + l.p1_collapsed[0] * collapse
-                    l.p1[1] = l.p1_orig[1] * (1.0 - collapse) + l.p1_collapsed[1] * collapse
-                    l.p1[2] = l.p1_orig[2] * (1.0 - collapse) + l.p1_collapsed[2] * collapse
-                    l.p2[0] = l.p2_orig[0] * (1.0 - collapse) + l.p2_collapsed[0] * collapse
-                    l.p2[1] = l.p2_orig[1] * (1.0 - collapse) + l.p2_collapsed[1] * collapse
-                    l.p2[2] = l.p2_orig[2] * (1.0 - collapse) + l.p2_collapsed[2] * collapse
-                    l.recompute()
+            for l in logs:
+                for s in range(NUM_LOG_SEGS):
+                    t_val = (s + 0.5) / float(NUM_LOG_SEGS)
+                    seg_p = [l.p1[k] + t_val * l.axis[k] for k in range(3)]
+
+                    if kindle_heat > 0.05:
+                        d_k = math.sqrt(sum((seg_p[k] - kindle_pos[k])**2 for k in range(3)))
+                        d_surf = max(0.0, d_k - l.radius - 1.6)
+                        if d_surf < 2.8:
+                            l.temp[s] += 0.015 * (1.0 - d_surf / 2.8) * kindle_heat * time_scale
+
+                    cur = l.temp[s]
+                    prev_t = l.temp[s-1] if s > 0 else cur
+                    next_t = l.temp[s+1] if s < NUM_LOG_SEGS - 1 else cur
+                    if prev_t > 0.35 or next_t > 0.35:
+                        l.temp[s] += 0.0035 * time_scale
+
+                    if l.temp[s] > 0.35:
+                        l.temp[s] = min(1.0, l.temp[s] + 0.004 * time_scale)
+                        l.burn_progress[s] += 0.00045 * time_scale
+                        l.structural_mass[s] = max(0.0, 1.0 - l.burn_progress[s] * 1.15)
+
+                        if l.burn_progress[s] > 0.65 and random.random() < 0.06:
+                            ash_p = list(seg_p)
+                            ash_p[1] += l.radius * 0.9
+                            vel = [(random.random() - 0.5) * 0.5 + wind * 0.4, -(random.random() * 0.4 + 0.2), (random.random() - 0.5) * 0.5]
+                            ash_flakes.append([ash_p[0], ash_p[1], ash_p[2], vel[0], vel[1], vel[2], PALETTE_ASH[random.choice([1, 2, 3])]])
+
+                    if l.burn_progress[s] > 0.85:
+                        l.temp[s] = max(0.15, l.temp[s] - 0.001 * time_scale)
+
+            # Self-collapse physics
+            total_mass = sum(l.structural_mass[s] for l in logs for s in range(NUM_LOG_SEGS))
+            total_segs = len(logs) * NUM_LOG_SEGS
+            avg_mass = total_mass / float(total_segs)
+            collapse_factor = max(0.0, 1.0 - avg_mass)
+            if force_collapse: collapse_factor = 1.0
+
+            for l in logs:
+                log_loss = 1.0 - (sum(l.structural_mass) / float(NUM_LOG_SEGS))
+                c = min(1.0, max(collapse_factor * 0.75, log_loss))
+                if force_collapse: c = 1.0
+
+                for k in range(3):
+                    l.p1[k] = l.p1_orig[k] * (1.0 - c) + l.p1_collapsed[k] * c
+                    l.p2[k] = l.p2_orig[k] * (1.0 - c) + l.p2_collapsed[k] * c
+                l.recompute()
 
             # Camera 3D Orbit Coordinates
             target = [0.0, -1.2, 0.0]
@@ -420,11 +491,6 @@ def main():
 
             world_w, world_h = 22.0, 14.0
 
-            # 3D projected screen positions for fire emitters
-            left_spire_w = [-1.2, -1.6, 0.4]
-            right_spire_w = [1.0, -1.6, -0.2]
-            core_w = [0.0, -1.8, 0.0]
-
             def project_pt(p):
                 rx_p = p[0] - cam_pos[0]
                 ry_p = p[1] - cam_pos[1]
@@ -434,45 +500,43 @@ def main():
                 sz = rx_p*fwd[0] + ry_p*fwd[1] + rz_p*fwd[2]
                 return sx, sy, sz
 
-            left_spire_x, _, _ = project_pt(left_spire_w)
-            right_spire_x, _, _ = project_pt(right_spire_w)
-            cx_f, cy_f, _ = project_pt(core_w)
-            cx = int(cx_f)
-            cradle_y = max(10, min(ph - 4, int(cy_f)))
+            # -------------------------------------------------------------
+            # FIRE INJECTION: Strictly wood segments & kindling
+            # -------------------------------------------------------------
+            next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
 
-            # 1. Heat from burning wood contacts
+            # Kindling flame
+            if kindle_heat > 0.05:
+                kx, ky, kz = project_pt(kindle_pos)
+                for dy in range(-3, 3):
+                    for dx in range(-3, 4):
+                        px, py = int(kx) + dx, int(ky) + dy
+                        if 0 <= px < pw and 0 <= py < ph:
+                            d = math.sqrt((dx * 0.9)**2 + (dy * 1.5)**2)
+                            if d < 3.2:
+                                fire_heat[py][px] = max(fire_heat[py][px], kindle_heat * 0.85 * (1.0 - d / 3.2))
+                                fire_z[py][px] = kz - 0.25
+
+            # Burning wood segments
             for l in logs:
-                if intensity < 0.15: continue
-                num_pts = int(l.length * 6)
-                for s in range(num_pts):
-                    t_val = s / float(num_pts)
-                    px = l.p1[0] + t_val * l.axis[0]
-                    py = l.p1[1] + t_val * l.axis[1]
-                    pz = l.p1[2] + t_val * l.axis[2]
-                    dist_c = math.sqrt(px*px + (py + 1.8)**2 + pz*pz)
-                    if dist_c < 4.5:
-                        gx_f, gy_f, gz = project_pt([px, py, pz])
-                        gx, gy = int(gx_f), int(gy_f)
-                        if 0 <= gx < pw and 0 <= gy < ph:
-                            wfire = (0.92 - (dist_c / 4.5) * 0.25) * intensity
-                            fire_heat[gy][gx] = max(fire_heat[gy][gx], wfire)
-                            fire_z[gy][gx] = gz - 0.25
+                for s in range(NUM_LOG_SEGS):
+                    if l.temp[s] > 0.35 and l.burn_progress[s] < 0.90:
+                        t_val = (s + 0.5) / float(NUM_LOG_SEGS)
+                        p = [l.p1[k] + t_val * l.axis[k] for k in range(3)]
+                        px, py, pz = project_pt(p)
+                        flame_h = l.temp[s] * 0.98
 
-            # 2. Glowing cradle ember bed
-            for dy in range(-4, 5):
-                for dx in range(-14, 15):
-                    d = math.sqrt((dx * 0.75)**2 + (dy * 1.8)**2)
-                    if d < 12.0:
-                        h = (1.0 - (d / 12.0)**1.8) * intensity
-                        gx, gy = cx + dx, cradle_y + dy
-                        if 0 <= gx < pw and 0 <= gy < ph:
-                            fire_heat[gy][gx] = max(fire_heat[gy][gx], h)
-                            _, _, gz = project_pt(core_w)
-                            fire_z[gy][gx] = gz - 0.4
+                        for dy in range(-4, 3):
+                            for dx in range(-4, 5):
+                                sx, sy = int(px) + dx, int(py) + dy
+                                if 0 <= sx < pw and 0 <= sy < ph:
+                                    d = math.sqrt((dx * 0.85)**2 + (dy * 1.5)**2)
+                                    if d < 4.2:
+                                        fire_heat[sy][sx] = max(fire_heat[sy][sx], flame_h * (1.0 - d / 4.2))
+                                        fire_z[sy][sx] = pz - 0.25
 
-            # 3. Convective flame propagation
-            for y in range(cradle_y, 2, -1):
-                hr = (cradle_y - y) / float(cradle_y)
+            # Convection upwards
+            for y in range(ph - 4, 1, -1):
                 for x in range(pw):
                     src_x = x
                     if wind > 0.35 and random.random() < 0.4:
@@ -483,81 +547,59 @@ def main():
                         src_x = max(0, min(pw - 1, x + random.choice([-1, 0, 1])))
 
                     below = fire_heat[y + 1][src_x]
-                    if below <= 0.03:
+                    if below <= 0.04:
                         next_fire[y][x] = 0.0
                         continue
 
-                    decay = 0.020 + 0.028 * random.random()
-                    dl = abs(x - (left_spire_x + math.sin(y * 0.14 + sim_time) * 1.8))
-                    dr = abs(x - (right_spire_x + math.sin(y * 0.18 + sim_time) * 2.2))
-                    dc = abs(x - cx)
-
-                    is_left = (dl < 8.0) and (hr < 0.78)
-                    is_right = (dr < 9.5) and (hr < 0.94)
-                    is_core = (dc < 6.5) and (hr < 0.52)
-
-                    if is_left or is_right or is_core:
-                        decay *= 0.48
-                    else:
-                        decay *= 2.6
-
+                    decay = 0.024 + 0.026 * random.random()
                     val = max(0.0, below - decay)
                     next_fire[y][x] = val
-
-                    _, _, gz_core = project_pt(core_w)
-                    if is_left:
-                        _, _, gz_l = project_pt(left_spire_w)
-                        fire_z[y][x] = gz_l - 0.2
-                    elif is_right:
-                        _, _, gz_r = project_pt(right_spire_w)
-                        fire_z[y][x] = gz_r - 0.2
-                    else:
-                        fire_z[y][x] = gz_core - 0.45
+                    fire_z[y][x] = fire_z[y + 1][src_x] - 0.02
 
             for y in range(ph):
                 for x in range(pw):
                     fire_heat[y][x] = next_fire[y][x]
 
-            # 4. Particles (Sparks & Ash)
-            if intensity > 0.3 and len(sparks) < 55 and random.random() < 0.75:
-                sx = cx_f + (random.random() - 0.5) * 16.0
-                sy = float(cradle_y) - 2.0
-                vx = (random.random() - 0.5) * 1.5 + wind * 1.8
-                vy = -(random.random() * 2.2 + 1.2)
-                col = PALETTE_EMBERS[random.choice([2, 3, 4])]
-                sparks.append([sx, sy, vx, vy, random.randint(18, 48), col])
+            # Sparks & Ash Flakes
+            if random.random() < 0.60:
+                burning_logs = [l for l in logs if any(t > 0.5 for t in l.temp)]
+                if burning_logs:
+                    l = random.choice(burning_logs)
+                    s = random.randint(0, NUM_LOG_SEGS - 1)
+                    t_val = (s + 0.5) / float(NUM_LOG_SEGS)
+                    p = [l.p1[k] + t_val * l.axis[k] for k in range(3)]
+                    vel = [(random.random() - 0.5) * 1.5 + wind * 1.2, random.random() * 3.2 + 2.0, (random.random() - 0.5) * 1.5]
+                    col = PALETTE_EMBERS[random.choice([2, 3, 4])]
+                    sparks.append([p[0], p[1], p[2], vel[0], vel[1], vel[2], random.randint(16, 42), col])
 
             alive_sparks = []
             for s in sparks:
-                s[0] += s[2]
-                s[1] += s[3]
-                s[3] += 0.04
-                s[4] -= 1
-                if s[4] > 0 and 0 <= s[0] < pw and 0 <= s[1] < ph:
+                s[0] += s[3] * 0.05
+                s[1] += s[4] * 0.05
+                s[2] += s[5] * 0.05
+                s[4] -= 0.04
+                s[6] -= 1
+                if s[6] > 0 and s[1] > -4.5:
                     alive_sparks.append(s)
             sparks = alive_sparks
 
-            if intensity > 0.4 and len(ash_flakes) < 45 and random.random() < 0.45:
-                ax = cx_f + (random.random() - 0.5) * 32.0
-                ay = max(2.0, float(cradle_y) - 18.0)
-                vx = (random.random() - 0.5) * 0.9 + wind * 1.4
-                vy = random.random() * 0.6 + 0.3
-                ash_col = PALETTE_ASH[random.choice([1, 2, 3])]
-                ash_flakes.append([ax, ay, vx, vy, ash_col])
-
             alive_flakes = []
             for f in ash_flakes:
-                f[0] += f[2] + math.sin(f[1] * 0.2 + sim_time) * 0.35
-                f[1] += f[3]
-                ix, iy = int(round(f[0])), int(round(f[1]))
-                if 0 <= ix < pw and iy < ph:
-                    if iy >= int(ph * 0.85) or settled_ash[iy][ix]:
-                        settled_ash[min(ph - 1, iy)][ix] = 1
-                    else:
-                        alive_flakes.append(f)
+                f[0] += f[3] * 0.05 + math.sin(f[1] * 2.0 + sim_time) * 0.02
+                f[1] += f[4] * 0.05
+                f[2] += f[5] * 0.05
+                if f[1] <= -4.15:
+                    sx, sy, _ = project_pt([f[0], f[1], f[2]])
+                    ix, iy = int(sx), int(sy)
+                    if 0 <= ix < pw and 0 <= iy < ph:
+                        settled_ash[iy][ix] = 1
+                else:
+                    alive_flakes.append(f)
             ash_flakes = alive_flakes
 
-        # Camera Projection & Raycasting
+        # -------------------------------------------------------------
+        # CAMERA PROJECTION & RAYCASTING
+        # -------------------------------------------------------------
         id_buf = [[0 for _ in range(pw)] for _ in range(ph)]
         depth_buf = [[1e9 for _ in range(pw)] for _ in range(ph)]
         shade_buf = [[(0, 0, 0) for _ in range(pw)] for _ in range(ph)]
@@ -581,31 +623,58 @@ def main():
 
                 closest_t = 1e9
                 hit_data = None
-                hit_log = None
+                hit_type = None
 
+                # Test stones
+                for st in stones:
+                    res = st.intersect(ro, rd)
+                    if res and res[0] < closest_t:
+                        closest_t = res[0]
+                        hit_data = (res, st)
+                        hit_type = 'stone'
+
+                # Test logs
                 for l in logs:
                     res = l.intersect(ro, rd)
                     if res and res[0] < closest_t:
                         closest_t = res[0]
-                        hit_data = res
-                        hit_log = l
+                        hit_data = (res, l)
+                        hit_type = 'log'
 
-                if hit_log:
-                    t, pt, norm, u, v, is_cap, rf = hit_data
-                    id_buf[y][x] = hit_log.obj_id
+                if hit_type == 'stone':
+                    res, st = hit_data
+                    t, pt, norm = res
+                    id_buf[y][x] = st.obj_id
                     depth_buf[y][x] = (pt[0]-cam_pos[0])*fwd[0] + (pt[1]-cam_pos[1])*fwd[1] + (pt[2]-cam_pos[2])*fwd[2]
 
-                    # Lighting
-                    lx, ly, lz = light_pos[0]-pt[0], light_pos[1]-pt[1], light_pos[2]-pt[2]
-                    ldist = math.sqrt(lx*lx + ly*ly + lz*lz) + 1e-6
-                    inv_ld = 1.0 / ldist
-                    ldir = [lx*inv_ld, ly*inv_ld, lz*inv_ld]
-                    atten = 1.0 / (1.0 + 0.08*ldist + 0.015*ldist*ldist)
-                    
-                    dot_raw = norm[0]*ldir[0] + norm[1]*ldir[1] + norm[2]*ldir[2]
-                    ndotl = max(0.0, (dot_raw + 0.45) / 1.45)
+                    l_vec = [light_pos[k] - pt[k] for k in range(3)]
+                    ldist = math.sqrt(sum(k*k for k in l_vec)) + 1e-6
+                    ldir = [k / ldist for k in l_vec]
+                    atten = 1.0 / (1.0 + 0.07 * ldist + 0.015 * ldist * ldist)
+                    ndotl = max(0.0, sum(norm[k] * ldir[k] for k in range(3)))
+                    ambient = 0.22 + 0.10 * max(0.0, norm[1])
+                    s_val = ndotl * atten * light_intensity * 2.2 + ambient
+
+                    rock_noise = (math.sin(pt[0] * 3.5 + pt[2] * 4.1) * 0.5 + 0.5) * 0.18
+                    s_idx = min(5, max(1, int((s_val + rock_noise) * 2.8)))
+                    shade_buf[y][x] = PALETTE_STONE[s_idx]
+
+                elif hit_type == 'log':
+                    res, l = hit_data
+                    t, pt, norm, u, v, is_cap, rf, hit_seg = res
+                    id_buf[y][x] = l.obj_id
+                    depth_buf[y][x] = (pt[0]-cam_pos[0])*fwd[0] + (pt[1]-cam_pos[1])*fwd[1] + (pt[2]-cam_pos[2])*fwd[2]
+
+                    l_vec = [light_pos[k] - pt[k] for k in range(3)]
+                    ldist = math.sqrt(sum(k*k for k in l_vec)) + 1e-6
+                    ldir = [k / ldist for k in l_vec]
+                    atten = 1.0 / (1.0 + 0.08 * ldist + 0.015 * ldist * ldist)
+                    ndotl = max(0.0, (sum(norm[k] * ldir[k] for k in range(3)) + 0.45) / 1.45)
                     ambient = 0.28 + 0.12 * max(0.0, norm[1])
                     lval = (ndotl * atten * light_intensity * 2.4 + ambient)
+
+                    burn = l.burn_progress[hit_seg]
+                    seg_temp = l.temp[hit_seg]
 
                     if is_cap:
                         r_q = math.floor(rf * 8.0) / 8.0
@@ -614,10 +683,9 @@ def main():
                         shade_buf[y][x] = PALETTE_ENDCAP[col_idx]
                     else:
                         num_plates_u = 14.0
-                        num_plates_v = hit_log.length * 2.2
+                        num_plates_v = l.length * 2.2
                         u_plate = math.floor(u * num_plates_u)
                         v_plate = math.floor(v * num_plates_v)
-                        
                         plate_hash = math.sin(u_plate * 12.9898 + v_plate * 78.233) * 43758.5453
                         plate_var = (plate_hash - math.floor(plate_hash)) * 0.25 - 0.12
 
@@ -625,24 +693,28 @@ def main():
                         v_frac = (v * num_plates_v) - v_plate
                         is_furrow = (u_frac < 0.12 or u_frac > 0.88 or (v_frac < 0.08 and (u_plate % 2 == 0)))
 
-                        dist_to_core = math.sqrt(pt[0]*pt[0] + (pt[1] + 1.8)**2 + pt[2]*pt[2])
-                        heat_exposure = max(0.0, 1.0 - dist_to_core / 4.8) * hit_log.charred
-
-                        if hit_log.ash_amount > 40.0:
-                            ash_idx = min(4, max(0, int((lval + plate_var) * 2.2)))
+                        if burn > 0.75:
+                            ash_idx = min(4, max(0, int((lval + plate_var) * 2.4)))
                             shade_buf[y][x] = PALETTE_ASH[ash_idx]
-                        elif heat_exposure > 0.45:
-                            if is_furrow and heat_exposure > 0.60:
-                                emb_idx = min(3, max(0, int(heat_exposure * 3.5)))
+                        elif burn > 0.40:
+                            if is_furrow and seg_temp > 0.50:
+                                emb_idx = min(3, max(0, int(seg_temp * 3.5)))
                                 shade_buf[y][x] = PALETTE_EMBERS[emb_idx]
                             else:
-                                c_idx = min(4, max(0, int((lval + plate_var) * 2.2)))
+                                c_idx = min(4, max(0, int((lval + plate_var) * 2.0)))
                                 shade_buf[y][x] = PALETTE_CHARRED[c_idx]
-                        elif is_furrow:
-                            shade_buf[y][x] = PALETTE_WOOD[0]
+                        elif burn > 0.15:
+                            if is_furrow:
+                                shade_buf[y][x] = PALETTE_CHARRED[0]
+                            else:
+                                b_idx = min(4, max(1, int((lval + plate_var) * 2.0)))
+                                shade_buf[y][x] = PALETTE_WOOD[b_idx]
                         else:
-                            b_idx = min(6, max(1, int((lval + plate_var) * 2.8)))
-                            shade_buf[y][x] = PALETTE_WOOD[b_idx]
+                            if is_furrow:
+                                shade_buf[y][x] = PALETTE_WOOD[0]
+                            else:
+                                b_idx = min(6, max(1, int((lval + plate_var) * 2.8)))
+                                shade_buf[y][x] = PALETTE_WOOD[b_idx]
 
         # 1-Pixel Cel Outline
         for y in range(ph):
@@ -663,7 +735,7 @@ def main():
                             break
 
                 if is_edge:
-                    frame_col[y][x] = PALETTE_WOOD[0]
+                    frame_col[y][x] = (18, 14, 12)
                     frame_sky[y][x] = False
                 else:
                     frame_col[y][x] = shade_buf[y][x]
@@ -681,10 +753,7 @@ def main():
                     else: fcol = PALETTE_EMBERS[0]
 
                     if id_buf[y][x] > 0:
-                        if fire_z[y][x] < depth_buf[y][x]:
-                            frame_col[y][x] = fcol
-                            frame_sky[y][x] = False
-                        elif heat > 0.55:
+                        if fire_z[y][x] < depth_buf[y][x] or heat > 0.55:
                             frame_col[y][x] = fcol
                             frame_sky[y][x] = False
                     else:
@@ -700,17 +769,21 @@ def main():
 
         # Flakes
         for f in ash_flakes:
-            ix, iy = int(round(f[0])), int(round(f[1]))
+            sx, sy, sz = project_pt([f[0], f[1], f[2]])
+            ix, iy = int(sx), int(sy)
             if 0 <= ix < pw and 0 <= iy < ph:
-                frame_col[iy][ix] = f[4]
-                frame_sky[iy][ix] = False
+                if sz < depth_buf[iy][ix]:
+                    frame_col[iy][ix] = f[6]
+                    frame_sky[iy][ix] = False
 
         # Sparks
         for s in sparks:
-            ix, iy = int(round(s[0])), int(round(s[1]))
+            sx, sy, sz = project_pt([s[0], s[1], s[2]])
+            ix, iy = int(sx), int(sy)
             if 0 <= ix < pw and 0 <= iy < ph:
-                frame_col[iy][ix] = s[5]
-                frame_sky[iy][ix] = False
+                if sz < depth_buf[iy][ix] or fire_heat[iy][ix] > 0.2:
+                    frame_col[iy][ix] = s[7]
+                    frame_sky[iy][ix] = False
 
         # Present frame
         out = ["\033[H"]
@@ -760,18 +833,18 @@ def main():
             p_fg, p_bg, p_transp = None, None, True
 
         stage_name = "1/7: Gravetos e Ignição"
-        if sim_time > 200.0: stage_name = "7/7: Cinzas Frias"
-        elif sim_time > 155.0: stage_name = "6/7: Leito de Brasas"
-        elif sim_time > 125.0: stage_name = "5/7: Colapso por Gravidade"
-        elif sim_time > 85.0: stage_name = "4/7: Madeira em Cinza"
-        elif sim_time > 35.0: stage_name = "3/7: Fogueira Roaring"
-        elif sim_time > 12.0: stage_name = "2/7: Chamas nas Toras"
+        if sim_time > 180.0: stage_name = "7/7: Cinzas Frias"
+        elif sim_time > 140.0: stage_name = "6/7: Leito de Brasas"
+        elif sim_time > 100.0: stage_name = "5/7: Colapso por Gravidade"
+        elif sim_time > 65.0: stage_name = "4/7: Madeira em Cinza"
+        elif sim_time > 28.0: stage_name = "3/7: Fogueira Roaring"
+        elif sim_time > 10.0: stage_name = "2/7: Chamas nas Toras"
 
         stack_name = ["Fogueira Quadrada", "Tenda Cônica", "Pirâmide"][stack_mode]
         yaw_deg = int(math.degrees(cam_yaw)) % 360
         pitch_deg = int(math.degrees(cam_pitch))
         tt_status = " [Turntable ON]" if auto_turntable else ""
-        out.append(f"\033[1;33m[3D Bonfire]\033[0m {sim_time:4.0f}s | Madeira: \033[1;32m{stack_name}\033[0m | Fase: \033[1;37m{stage_name}\033[0m | Cam: {yaw_deg:3d}°/{pitch_deg:2d}°{tt_status} | [m] Modo | [Setas/WASD] Girar | [t] Turntable | [c] Colapsar | [q] Sair ")
+        out.append(f"\033[1;33m[3D Bonfire]\033[0m {sim_time:4.0f}s | Base: Pedras | Madeira: \033[1;32m{stack_name}\033[0m | Fase: \033[1;37m{stage_name}\033[0m | Cam: {yaw_deg:3d}°/{pitch_deg:2d}°{tt_status} | [m] Modo | [Setas/WASD] Girar | [t] Turntable | [c] Colapsar | [q] Sair ")
 
         sys.stdout.write("".join(out))
         sys.stdout.flush()
