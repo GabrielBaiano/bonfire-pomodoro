@@ -79,27 +79,57 @@ PALETTE_ASH = [
 NUM_LOG_SEGS = 10
 
 class Stone3D:
-    def __init__(self, obj_id, center, radius):
+    def __init__(self, obj_id, center, u_tan, v_up, w_rad, ru, rv, rw, shade_var=0.0):
         self.obj_id = obj_id
         self.center = list(center)
-        self.radius = radius
+        self.u_tan = list(u_tan)
+        self.v_up = list(v_up)
+        self.w_rad = list(w_rad)
+        self.ru = ru
+        self.rv = rv
+        self.rw = rw
+        self.shade_var = shade_var
 
     def intersect(self, ro, rd):
         oc = [ro[0] - self.center[0], ro[1] - self.center[1], ro[2] - self.center[2]]
-        b = oc[0]*rd[0] + oc[1]*rd[1] + oc[2]*rd[2]
-        c = (oc[0]*oc[0] + oc[1]*oc[1] + oc[2]*oc[2]) - self.radius * self.radius
-        disc = b * b - c
+        inv_u = 1.0 / self.ru
+        inv_v = 1.0 / self.rv
+        inv_w = 1.0 / self.rw
+
+        p0 = [
+            (oc[0]*self.u_tan[0] + oc[1]*self.u_tan[1] + oc[2]*self.u_tan[2]) * inv_u,
+            (oc[0]*self.v_up[0]  + oc[1]*self.v_up[1]  + oc[2]*self.v_up[2])  * inv_v,
+            (oc[0]*self.w_rad[0] + oc[1]*self.w_rad[1] + oc[2]*self.w_rad[2]) * inv_w
+        ]
+        d0 = [
+            (rd[0]*self.u_tan[0] + rd[1]*self.u_tan[1] + rd[2]*self.u_tan[2]) * inv_u,
+            (rd[0]*self.v_up[0]  + rd[1]*self.v_up[1]  + rd[2]*self.v_up[2])  * inv_v,
+            (rd[0]*self.w_rad[0] + rd[1]*self.w_rad[1] + rd[2]*self.w_rad[2]) * inv_w
+        ]
+
+        a = d0[0]*d0[0] + d0[1]*d0[1] + d0[2]*d0[2]
+        b = p0[0]*d0[0] + p0[1]*d0[1] + p0[2]*d0[2]
+        c = (p0[0]*p0[0] + p0[1]*p0[1] + p0[2]*p0[2]) - 1.0
+        disc = b * b - a * c
         if disc < 0:
             return None
         sdisc = math.sqrt(disc)
-        t = -b - sdisc
+        t = (-b - sdisc) / a
         if t < 0.1:
-            t = -b + sdisc
+            t = (-b + sdisc) / a
         if t < 0.1:
             return None
+
         pt = [ro[0] + t * rd[0], ro[1] + t * rd[1], ro[2] + t * rd[2]]
-        inv_r = 1.0 / self.radius
-        norm = [(pt[0] - self.center[0]) * inv_r, (pt[1] - self.center[1]) * inv_r, (pt[2] - self.center[2]) * inv_r]
+        loc_p = [p0[0] + t * d0[0], p0[1] + t * d0[1], p0[2] + t * d0[2]]
+        loc_n = [loc_p[0] * inv_u, loc_p[1] * inv_v, loc_p[2] * inv_w]
+        world_n = [
+            loc_n[0]*self.u_tan[0] + loc_n[1]*self.v_up[0] + loc_n[2]*self.w_rad[0],
+            loc_n[0]*self.u_tan[1] + loc_n[1]*self.v_up[1] + loc_n[2]*self.w_rad[1],
+            loc_n[0]*self.u_tan[2] + loc_n[1]*self.v_up[2] + loc_n[2]*self.w_rad[2]
+        ]
+        n_len = math.sqrt(world_n[0]*world_n[0] + world_n[1]*world_n[1] + world_n[2]*world_n[2]) + 1e-6
+        norm = [world_n[0] / n_len, world_n[1] / n_len, world_n[2] / n_len]
         return t, pt, norm
 
 class AshBed3D:
@@ -163,6 +193,10 @@ class SegmentedCylinder3D:
         self.temp = [0.0 for _ in range(NUM_LOG_SEGS)]
         self.burn_progress = [0.0 for _ in range(NUM_LOG_SEGS)]
         self.structural_mass = [1.0 for _ in range(NUM_LOG_SEGS)]
+        self.collapse_cur = 0.0
+        self.collapse_speed = 0.0
+        self.support_log1 = -1
+        self.support_log2 = -1
         self.recompute()
 
     def recompute(self):
@@ -258,67 +292,131 @@ class SegmentedCylinder3D:
 def build_stone_ring():
     ground_y = -4.2
     stones = []
-    num_stones = 10
-    ring_radius = 7.0
+    num_stones = 16
+    ring_radius = 6.8
     for i in range(num_stones):
-        angle = i * (2.0 * math.pi / num_stones) + 0.15
-        sx = ring_radius * math.cos(angle)
-        sz = ring_radius * math.sin(angle)
-        sr = 0.95 + 0.20 * math.sin(i * 3.7)
-        sy = ground_y + sr * 0.82
-        stones.append(Stone3D(100 + i, [sx, sy, sz], sr))
+        base_angle = i * (2.0 * math.pi / num_stones)
+        angle = base_angle + 0.09 * math.sin(i * 2.3 + 1.2)
+        r_dist = ring_radius + 0.35 * math.sin(i * 3.7 + 0.5)
+
+        ru = 1.45 + 0.20 * math.sin(i * 4.1)
+        rv = 0.78 + 0.15 * math.cos(i * 2.7)
+        rw = 1.10 + 0.18 * math.sin(i * 5.3)
+
+        c = [
+            r_dist * math.cos(angle),
+            ground_y + rv * 0.82 + 0.06 * math.sin(i * 1.9),
+            r_dist * math.sin(angle)
+        ]
+
+        u = [-math.sin(angle), 0.0, math.cos(angle)]
+        v = [0.0, 1.0, 0.0]
+        w = [math.cos(angle), 0.0, math.sin(angle)]
+        shade_var = 0.12 * math.sin(i * 4.8 + 2.1)
+
+        stones.append(Stone3D(100 + i, c, u, v, w, ru, rv, rw, shade_var))
     return stones
 
 # Stacking generator functions
 def get_stack_log_cabin():
     ground_y = -4.2
-    r1, r2, r3 = 1.25, 1.15, 0.95
     span = 3.6
-    y1 = ground_y + r1
-    y2 = y1 + r1 + r2 - 0.25
-    y2_coll = ground_y + r2
-    y3 = y2 + r2 + r3 - 0.20
-    y3_coll = ground_y + r3 + 0.3
 
-    return [
-        SegmentedCylinder3D(1, [-5.0, y1, -span], [5.0, y1, -span], [-5.0, y1, -span], [5.0, y1, -span], r1, 0.25),
-        SegmentedCylinder3D(2, [-5.0, y1,  span], [5.0, y1,  span], [-5.0, y1,  span], [5.0, y1,  span], r1, 0.25),
-        SegmentedCylinder3D(3, [-span, y2, -5.0], [-span, y2, 5.0], [-span, y2_coll, -4.5], [-span, y2_coll, 4.5], r2, 0.40),
-        SegmentedCylinder3D(4, [ span, y2, -5.0], [ span, y2, 5.0], [ span, y2_coll, -4.5], [ span, y2_coll, 4.5], r2, 0.40),
-        SegmentedCylinder3D(5, [-4.0, y3, -3.0], [4.0, y3, 3.0], [-2.5, y3_coll, -1.8], [2.5, y3_coll, 1.8], r3, 0.60),
-        SegmentedCylinder3D(6, [-4.0, y3,  3.0], [4.0, y3, -3.0], [-2.5, y3_coll,  1.8], [2.5, y3_coll, -1.8], r3, 0.60),
-    ]
+    r0 = 1.32
+    y0 = ground_y + r0
+    l0 = SegmentedCylinder3D(1, [-4.8, y0, -span - 0.15], [5.3, y0, -span + 0.15], [-4.8, y0, -span - 0.15], [5.3, y0, -span + 0.15], r0, 0.25)
+    l0.support_log1 = -1
+    l0.support_log2 = -1
+
+    r1 = 1.18
+    y1 = ground_y + r1
+    l1 = SegmentedCylinder3D(2, [-5.2, y1,  span + 0.20], [4.6, y1,  span - 0.10], [-5.2, y1,  span + 0.20], [4.6, y1,  span - 0.10], r1, 0.25)
+    l1.support_log1 = -1
+    l1.support_log2 = -1
+
+    r2 = 1.10
+    y2 = ground_y + max(r0, r1) + r2 - 0.15
+    y2_coll = ground_y + r2
+    l2 = SegmentedCylinder3D(3, [-span - 0.20, y2, -5.1], [-span + 0.15, y2, 4.7], [-span - 0.10, y2_coll, -4.6], [-span + 0.10, y2_coll, 4.3], r2, 0.35)
+    l2.support_log1 = 0
+    l2.support_log2 = 1
+
+    r3 = 1.26
+    y3 = ground_y + max(r0, r1) + r3 - 0.15
+    y3_coll = ground_y + r3
+    l3 = SegmentedCylinder3D(4, [ span - 0.10, y3, -4.6], [ span + 0.25, y3, 5.3], [ span - 0.05, y3_coll, -4.2], [ span + 0.15, y3_coll, 4.8], r3, 0.35)
+    l3.support_log1 = 0
+    l3.support_log2 = 1
+
+    r4 = 0.92
+    y4 = y2 + r2 + r4 - 0.15
+    y4_coll = ground_y + r4 + 0.35
+    l4 = SegmentedCylinder3D(5, [-3.8, y4, -3.2], [4.2, y4, 2.7], [-2.2, y4_coll, -1.6], [2.4, y4_coll, 1.4], r4, 0.50)
+    l4.support_log1 = 2
+    l4.support_log2 = 3
+
+    r5 = 1.04
+    y5 = y3 + r3 + r5 - 0.15
+    y5_coll = ground_y + r5 + 0.30
+    l5 = SegmentedCylinder3D(6, [-4.3, y5,  2.8], [3.9, y5, -3.1], [-2.4, y5_coll,  1.5], [2.2, y5_coll, -1.6], r5, 0.50)
+    l5.support_log1 = 2
+    l5.support_log2 = 3
+
+    return [l0, l1, l2, l3, l4, l5]
 
 def get_stack_teepee():
     ground_y = -4.2
     base_r = 4.2
-    apex_r = 0.6
+    apex_r = 0.65
     apex_y = 2.4
-    r = 1.15
+    radii = [1.08, 1.25, 1.14, 1.22, 1.05]
+    angle_offsets = [0.30, 1.58, 2.75, 4.02, 5.35]
     logs = []
     for i in range(5):
-        angle = (i * 2.0 * math.pi / 5.0) + 0.3
-        p1 = [base_r * math.cos(angle), ground_y + r, base_r * math.sin(angle)]
-        p2 = [apex_r * math.cos(angle), apex_y, apex_r * math.sin(angle)]
-        p2_coll = [apex_r * 0.4 * math.cos(angle), ground_y + r + 0.4, apex_r * 0.4 * math.sin(angle)]
-        logs.append(SegmentedCylinder3D(i + 1, p1, p2, p1, p2_coll, r, 0.45))
+        angle = angle_offsets[i]
+        r = radii[i]
+        p1 = [(base_r + 0.2 * math.sin(i * 3.1)) * math.cos(angle), ground_y + r, (base_r + 0.2 * math.cos(i * 2.7)) * math.sin(angle)]
+        p2 = [apex_r * math.cos(angle) + 0.08 * math.sin(i * 1.5), apex_y + 0.12 * math.cos(i * 2.0), apex_r * math.sin(angle)]
+        p2_coll = [apex_r * 0.35 * math.cos(angle), ground_y + r + 0.35, apex_r * 0.35 * math.sin(angle)]
+        log = SegmentedCylinder3D(i + 1, p1, p2, p1, p2_coll, r, 0.45)
+        log.support_log1 = -1
+        log.support_log2 = -1
+        logs.append(log)
     return logs
 
 def get_stack_pyramid():
     ground_y = -4.2
-    r_base = 1.35
-    r_cross = 1.10
-    y1 = ground_y + r_base
-    y_apex = 2.2
-    y_coll = ground_y + r_cross + 0.2
+    r_base0 = 1.38
+    r_base1 = 1.26
+    y1_0 = ground_y + r_base0
+    y1_1 = ground_y + r_base1
 
-    return [
-        SegmentedCylinder3D(1, [-5.5, y1, -2.5], [5.5, y1, -2.5], [-5.5, y1, -2.5], [5.5, y1, -2.5], r_base, 0.25),
-        SegmentedCylinder3D(2, [-5.5, y1,  2.5], [5.5, y1,  2.5], [-5.5, y1,  2.5], [5.5, y1,  2.5], r_base, 0.25),
-        SegmentedCylinder3D(3, [-4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [-4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
-        SegmentedCylinder3D(4, [ 4.2, y1 + r_base - 0.2, -1.0], [0.0, y_apex, -0.2], [ 4.0, y_coll, -0.6], [0.0, y_coll, -0.1], r_cross, 0.50),
-        SegmentedCylinder3D(5, [ 0.0, y1 + r_base - 0.2,  3.0], [0.0, y_apex,  0.4], [ 0.0, y_coll,  2.4], [0.0, y_coll,  0.2], r_cross, 0.50),
-    ]
+    l0 = SegmentedCylinder3D(1, [-5.4, y1_0, -2.4], [5.6, y1_0, -2.6], [-5.4, y1_0, -2.4], [5.6, y1_0, -2.6], r_base0, 0.25)
+    l0.support_log1 = -1
+    l0.support_log2 = -1
+
+    l1 = SegmentedCylinder3D(2, [-5.6, y1_1,  2.6], [5.2, y1_1,  2.4], [-5.6, y1_1,  2.6], [5.2, y1_1,  2.4], r_base1, 0.25)
+    l1.support_log1 = -1
+    l1.support_log2 = -1
+
+    y_apex = 2.2
+    r_cross2, r_cross3, r_cross4 = 1.08, 1.15, 1.12
+    y_coll2 = ground_y + r_cross2 + 0.2
+    l2 = SegmentedCylinder3D(3, [-4.2, y1_0 + r_base0 - 0.2, -1.1], [-0.1, y_apex + 0.1, -0.2], [-3.8, y_coll2, -0.6], [-0.1, y_coll2, -0.1], r_cross2, 0.50)
+    l2.support_log1 = 0
+    l2.support_log2 = -1
+
+    y_coll3 = ground_y + r_cross3 + 0.2
+    l3 = SegmentedCylinder3D(4, [ 4.3, y1_0 + r_base0 - 0.2, -0.9], [ 0.1, y_apex, -0.3], [ 3.9, y_coll3, -0.6], [ 0.1, y_coll3, -0.1], r_cross3, 0.50)
+    l3.support_log1 = 0
+    l3.support_log2 = -1
+
+    y_coll4 = ground_y + r_cross4 + 0.2
+    l4 = SegmentedCylinder3D(5, [ 0.2, y1_1 + r_base1 - 0.2,  3.1], [ 0.0, y_apex + 0.15, 0.4], [ 0.1, y_coll4,  2.3], [ 0.0, y_coll4,  0.2], r_cross4, 0.50)
+    l4.support_log1 = 1
+    l4.support_log2 = -1
+
+    return [l0, l1, l2, l3, l4]
 
 def main():
     old_settings = termios.tcgetattr(sys.stdin)
@@ -461,29 +559,69 @@ def main():
             kindle_pos = [0.0, -2.6, 0.0]
             kindle_heat = max(0.0, 1.0 - (sim_time / 22.0)) if sim_time < 22.0 else 0.0
 
+            # -------------------------------------------------------------
+            # HETEROGENEOUS PIECE-BY-PIECE COMBUSTION WITH RADIAL CORE DRAFT
+            # -------------------------------------------------------------
             for l in logs:
                 for s in range(NUM_LOG_SEGS):
                     t_val = (s + 0.5) / float(NUM_LOG_SEGS)
                     seg_p = [l.p1[k] + t_val * l.axis[k] for k in range(3)]
 
+                    r_seg = math.sqrt(seg_p[0]*seg_p[0] + seg_p[2]*seg_p[2])
+                    r_norm = r_seg / 3.6
+                    eta_r = max(0.0, 1.0 - r_norm * r_norm)
+
+                    # 1. Initial kindling nest heat (concentrated in center core)
                     if kindle_heat > 0.05:
                         d_k = math.sqrt(sum((seg_p[k] - kindle_pos[k])**2 for k in range(3)))
-                        d_surf = max(0.0, d_k - l.radius - 1.6)
-                        if d_surf < 2.8:
-                            l.temp[s] += 0.015 * (1.0 - d_surf / 2.8) * kindle_heat * time_scale
+                        d_surf = max(0.0, d_k - l.radius - 1.5)
+                        if d_surf < 2.5:
+                            l.temp[s] += 0.018 * (1.0 - d_surf / 2.5) * kindle_heat * eta_r * time_scale
 
+                    # 2. Ash bed radiant ember heat
+                    if ash_bed.heat > 0.15 and seg_p[1] < 0.2:
+                        bed_dy = max(0.0, seg_p[1] - ash_bed.center[1])
+                        if bed_dy < 3.2:
+                            bed_fac = (1.0 - bed_dy / 3.2) * eta_r
+                            l.temp[s] += 0.005 * ash_bed.heat * bed_fac * time_scale
+
+                    # 3. Cross-log fire radiation from actively burning segments within draft core
+                    for other in logs:
+                        if other is l:
+                            continue
+                        for sj in range(NUM_LOG_SEGS):
+                            if other.temp[sj] > 0.38 and other.structural_mass[sj] > 0.10:
+                                tj = (sj + 0.5) / float(NUM_LOG_SEGS)
+                                pj = [other.p1[k] + tj * other.axis[k] for k in range(3)]
+                                d_cross = math.sqrt(sum((seg_p[k] - pj[k])**2 for k in range(3)))
+                                d_cross_surf = max(0.0, d_cross - l.radius - other.radius)
+                                if d_cross_surf < 1.3:
+                                    rad_power = (1.0 - d_cross_surf / 1.3) * (0.25 + 0.75 * eta_r)
+                                    l.temp[s] += 0.004 * rad_power * time_scale
+
+                    # 4. Conservative 1D thermal diffusion along wood grain
                     cur = l.temp[s]
                     prev_t = l.temp[s-1] if s > 0 else cur
                     next_t = l.temp[s+1] if s < NUM_LOG_SEGS - 1 else cur
-                    if prev_t > 0.35 or next_t > 0.35:
-                        l.temp[s] += 0.0035 * time_scale
+                    laplacian = prev_t - 2.0 * cur + next_t
+                    l.temp[s] += 0.0016 * laplacian * time_scale
 
+                    # 5. Ambient convective cooling (outer ends exposed to cold air cool down rapidly)
+                    cool_factor = 1.0 - 0.75 * eta_r
+                    l.temp[s] -= 0.0022 * cur * cool_factor * time_scale
+
+                    # 6. Active combustion & calcification: sustained only if hot and fueled by draft
                     if l.temp[s] > 0.35:
-                        l.temp[s] = min(1.0, l.temp[s] + 0.004 * time_scale)
-                        l.burn_progress[s] += 0.00045 * time_scale
-                        l.structural_mass[s] = max(0.0, 1.0 - l.burn_progress[s] * 1.15)
+                        if eta_r > 0.05:
+                            l.temp[s] = min(1.0, l.temp[s] + 0.0035 * eta_r * time_scale)
+                            burn_rate = 0.00042 * (l.temp[s] - 0.30) * (0.20 + 0.80 * eta_r)
+                            l.burn_progress[s] += burn_rate * time_scale
+                        else:
+                            l.burn_progress[s] += 0.00008 * time_scale
 
-                        if l.burn_progress[s] > 0.60 and random.random() < 0.05:
+                        l.structural_mass[s] = max(0.0, 1.0 - l.burn_progress[s] * 1.25)
+
+                        if l.burn_progress[s] > 0.60 and random.random() < 0.04:
                             ang = random.random() * 6.28318
                             rad_dir = [
                                 l.tangent[k] * math.cos(ang) + l.bitangent[k] * math.sin(ang)
@@ -494,9 +632,13 @@ def main():
                             ash_flakes.append([ash_p[0], ash_p[1], ash_p[2], vel[0], vel[1], vel[2], PALETTE_ASH[random.choice([2, 3])]])
 
                     if l.burn_progress[s] > 0.85:
-                        l.temp[s] = max(0.15, l.temp[s] - 0.001 * time_scale)
+                        l.temp[s] = max(0.12, l.temp[s] - 0.0012 * time_scale)
+                    if l.temp[s] < 0.0:
+                        l.temp[s] = 0.0
 
-            # Self-collapse physics & 3D ash bed accumulation
+            # -------------------------------------------------------------
+            # ASYNCHRONOUS SEGMENT-DRIVEN COLLAPSE PHYSICS
+            # -------------------------------------------------------------
             total_mass = sum(l.structural_mass[s] for l in logs for s in range(NUM_LOG_SEGS))
             total_segs = len(logs) * NUM_LOG_SEGS
             active_burning = sum(1 for l in logs for s in range(NUM_LOG_SEGS) if l.temp[s] > 0.35)
@@ -509,14 +651,37 @@ def main():
             elif sim_time > 25.0:
                 ash_bed.heat = max(0.12, ash_bed.heat - 0.0003 * time_scale)
 
-            collapse_factor = max(0.0, 1.0 - avg_mass)
-            if force_collapse: collapse_factor = 1.0
+            # Individual collapse calculation per log based on supporting contacts & core mass
+            for i, l in enumerate(logs):
+                support_integrity = 1.0
+                if 0 <= l.support_log1 < len(logs):
+                    s1 = logs[l.support_log1]
+                    s1_m = (s1.structural_mass[3] + s1.structural_mass[8]) * 0.5
+                    s1_eff = s1_m * (1.0 - s1.collapse_cur * 0.65)
+                    support_integrity = min(support_integrity, s1_eff)
+                if 0 <= l.support_log2 < len(logs):
+                    s2 = logs[l.support_log2]
+                    s2_m = (s2.structural_mass[3] + s2.structural_mass[8]) * 0.5
+                    s2_eff = s2_m * (1.0 - s2.collapse_cur * 0.65)
+                    support_integrity = min(support_integrity, s2_eff)
 
-            for l in logs:
-                log_loss = 1.0 - (sum(l.structural_mass) / float(NUM_LOG_SEGS))
-                c = min(1.0, max(collapse_factor * 0.75, log_loss))
-                if force_collapse: c = 1.0
+                own_center_mass = (l.structural_mass[4] + l.structural_mass[5] + l.structural_mass[6]) / 3.0
+                log_integrity = min(support_integrity, own_center_mass)
 
+                target_c = 0.0
+                if force_collapse:
+                    target_c = 1.0
+                elif log_integrity < 0.45:
+                    target_c = min(1.0, (0.45 - log_integrity) / 0.45)
+
+                if target_c > l.collapse_cur:
+                    l.collapse_speed += 0.0020 * time_scale
+                    l.collapse_cur += l.collapse_speed
+                    if l.collapse_cur >= target_c:
+                        l.collapse_cur = target_c
+                        l.collapse_speed = 0.0
+
+                c = l.collapse_cur
                 for k in range(3):
                     l.p1[k] = l.p1_orig[k] * (1.0 - c) + l.p1_collapsed[k] * c
                     l.p2[k] = l.p2_orig[k] * (1.0 - c) + l.p2_collapsed[k] * c
@@ -560,7 +725,7 @@ def main():
                 return sx, sy, sz
 
             # -------------------------------------------------------------
-            # FIRE INJECTION: Strictly wood segments & kindling
+            # FIRE INJECTION: Strictly wood segments in central core & kindling
             # -------------------------------------------------------------
             next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
 
@@ -576,14 +741,22 @@ def main():
                                 fire_heat[py][px] = max(fire_heat[py][px], kindle_heat * 0.85 * (1.0 - d / 3.2))
                                 fire_z[py][px] = kz - 0.25
 
-            # Burning wood segments
+            # Burning wood segments inside core draft chimney
             for l in logs:
                 for s in range(NUM_LOG_SEGS):
-                    if l.temp[s] > 0.35 and l.burn_progress[s] < 0.90:
+                    if l.temp[s] > 0.38 and l.burn_progress[s] < 0.90:
                         t_val = (s + 0.5) / float(NUM_LOG_SEGS)
                         p = [l.p1[k] + t_val * l.axis[k] for k in range(3)]
+
+                        r_seg = math.sqrt(p[0]*p[0] + p[2]*p[2])
+                        r_norm = r_seg / 3.4
+                        eta_r = max(0.0, 1.0 - r_norm * r_norm)
+
+                        if eta_r <= 0.08:
+                            continue
+
                         px, py, pz = project_pt(p)
-                        flame_h = l.temp[s] * 0.98
+                        flame_h = l.temp[s] * (0.25 + 0.75 * eta_r) * 1.05
 
                         for dy in range(-4, 3):
                             for dx in range(-4, 5):
@@ -725,7 +898,7 @@ def main():
                     s_val = ndotl * atten * light_intensity * 2.2 + ambient
 
                     rock_noise = (math.sin(pt[0] * 3.5 + pt[2] * 4.1) * 0.5 + 0.5) * 0.18
-                    s_idx = min(5, max(1, int((s_val + rock_noise) * 2.8)))
+                    s_idx = min(5, max(1, int((s_val + rock_noise + st.shade_var) * 2.8)))
                     shade_buf[y][x] = PALETTE_STONE[s_idx]
 
                 elif hit_type == 'log':

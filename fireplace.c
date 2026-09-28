@@ -38,7 +38,7 @@
 #define MAX_SPARKS 256
 #define MAX_ASH_FLAKES 128
 #define MAX_LOGS 16
-#define MAX_STONES 16
+#define MAX_STONES 24
 #define NUM_LOG_SEGS 10
 
 typedef struct {
@@ -116,7 +116,7 @@ typedef struct {
 
 typedef struct {
     int obj_id;
-    Vec3 p1, p2;                       // Current geometry
+    Vec3 p1, p2;                       // Current dynamic endpoints
     Vec3 p1_orig, p2_orig;             // Initial stack geometry
     Vec3 p1_collapsed, p2_collapsed;   // Physical collapse target under gravity
     float radius;
@@ -126,12 +126,19 @@ typedef struct {
     Vec3 axis, dir, tangent, bitangent;
     float length;
     LogSegment segments[NUM_LOG_SEGS];
+    float collapse_cur;                // Current individual collapse progression [0.0, 1.0]
+    float collapse_speed;              // Settling downward velocity
+    int support_log1, support_log2;    // Log IDs that support this log (-1 = ground)
 } Cylinder3D;
 
 typedef struct {
     int obj_id;
     Vec3 center;
-    float radius;
+    Vec3 u_tan;      // Tangent axis along the ring perimeter
+    Vec3 v_up;       // Vertical axis (up)
+    Vec3 w_rad;      // Radial axis (outward)
+    float ru, rv, rw;// Semi-axes: tangential width, height, radial depth
+    float shade_var; // Individual rock color tone variation
 } Stone3D;
 
 #define OBJ_ASH_BED 500
@@ -286,6 +293,10 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->charred = charred;
     c->wood_health = 100.0f;
     c->ash_amount = 0.0f;
+    c->collapse_cur = 0.0f;
+    c->collapse_speed = 0.0f;
+    c->support_log1 = -1;
+    c->support_log2 = -1;
     for (int s = 0; s < NUM_LOG_SEGS; s++) {
         c->segments[s].temp = 0.0f;
         c->segments[s].burn_progress = 0.0f;
@@ -356,35 +367,83 @@ static void update_dimensions(void) {
 // -----------------------------------------------------------------------------
 static void build_stone_ring(void) {
     float ground_y = -4.2f;
-    g_num_stones = 10;
-    float ring_r = 7.0f;
+    g_num_stones = 16;
+    float ring_r = 6.8f;
     for (int i = 0; i < g_num_stones; i++) {
-        float angle = i * (2.0f * (float)M_PI / (float)g_num_stones) + 0.15f;
-        float sr = 0.95f + 0.20f * sinf(i * 3.7f);
+        float base_angle = i * (2.0f * (float)M_PI / (float)g_num_stones);
+        float angle = base_angle + 0.09f * sinf(i * 2.3f + 1.2f);
+        float r_dist = ring_r + 0.35f * sinf(i * 3.7f + 0.5f);
+
+        // Anisotropic dimensions: flattened and elongated along ring perimeter
+        float ru = 1.45f + 0.20f * sinf(i * 4.1f);  // Tangential width (interlocking)
+        float rv = 0.78f + 0.15f * cosf(i * 2.7f);  // Height (flattened boulder)
+        float rw = 1.10f + 0.18f * sinf(i * 5.3f);  // Radial depth
+
         Vec3 c = {
-            ring_r * cosf(angle),
-            ground_y + sr * 0.82f,
-            ring_r * sinf(angle)
+            r_dist * cosf(angle),
+            ground_y + rv * 0.82f + 0.06f * sinf(i * 1.9f),
+            r_dist * sinf(angle)
         };
+
+        // Orthonormal frame for oriented ellipsoid
+        Vec3 u = (Vec3){ -sinf(angle), 0.0f, cosf(angle) }; // Tangent along ring
+        Vec3 v = (Vec3){ 0.0f, 1.0f, 0.0f };                // Vertical up
+        Vec3 w = (Vec3){ cosf(angle), 0.0f, sinf(angle) };  // Radial outward
+
         g_stones[i].obj_id = 100 + i;
         g_stones[i].center = c;
-        g_stones[i].radius = sr;
+        g_stones[i].u_tan = u;
+        g_stones[i].v_up = v;
+        g_stones[i].w_rad = w;
+        g_stones[i].ru = ru;
+        g_stones[i].rv = rv;
+        g_stones[i].rw = rw;
+        g_stones[i].shade_var = 0.12f * sinf(i * 4.8f + 2.1f);
     }
 }
 
-static bool intersect_sphere(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+static bool intersect_stone(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
     Vec3 oc = vec3_sub(ro, st->center);
-    float b = vec3_dot(oc, rd);
-    float c = vec3_dot(oc, oc) - st->radius * st->radius;
-    float disc = b * b - c;
+    float inv_u = 1.0f / st->ru;
+    float inv_v = 1.0f / st->rv;
+    float inv_w = 1.0f / st->rw;
+
+    // Project ray into stone's local unit-sphere coordinates
+    Vec3 p0 = (Vec3){
+        vec3_dot(oc, st->u_tan) * inv_u,
+        vec3_dot(oc, st->v_up)  * inv_v,
+        vec3_dot(oc, st->w_rad) * inv_w
+    };
+    Vec3 d0 = (Vec3){
+        vec3_dot(rd, st->u_tan) * inv_u,
+        vec3_dot(rd, st->v_up)  * inv_v,
+        vec3_dot(rd, st->w_rad) * inv_w
+    };
+
+    float a = vec3_dot(d0, d0);
+    float b = vec3_dot(p0, d0);
+    float c = vec3_dot(p0, p0) - 1.0f;
+    float disc = b * b - a * c;
     if (disc < 0.0f) return false;
+
     float sdisc = sqrtf(disc);
-    float t = -b - sdisc;
-    if (t < 0.1f) t = -b + sdisc;
+    float t = (-b - sdisc) / a;
+    if (t < 0.1f) t = (-b + sdisc) / a;
     if (t < 0.1f) return false;
+
     *out_t = t;
-    *out_pt = vec3_add(ro, vec3_scale(rd, t));
-    *out_norm = vec3_norm(vec3_sub(*out_pt, st->center));
+    Vec3 hit_p = vec3_add(ro, vec3_scale(rd, t));
+    *out_pt = hit_p;
+
+    // Normal in local ellipsoid space
+    Vec3 loc_p = vec3_add(p0, vec3_scale(d0, t));
+    Vec3 loc_n = (Vec3){ loc_p.x * inv_u, loc_p.y * inv_v, loc_p.z * inv_w };
+    Vec3 world_n = (Vec3){
+        loc_n.x * st->u_tan.x + loc_n.y * st->v_up.x + loc_n.z * st->w_rad.x,
+        loc_n.x * st->u_tan.y + loc_n.y * st->v_up.y + loc_n.z * st->w_rad.y,
+        loc_n.x * st->u_tan.z + loc_n.y * st->v_up.z + loc_n.z * st->w_rad.z
+    };
+    *out_norm = vec3_norm(world_n);
     return true;
 }
 
@@ -444,45 +503,68 @@ static bool intersect_ash_bed(const AshBed3D *bed, Vec3 ro, Vec3 rd, float *out_
 static void build_stack_log_cabin(void) {
     g_num_logs = 6;
     float ground_y = -4.2f;
-    float r1 = 1.25f;
-    float r2 = 1.15f;
-    float r3 = 0.95f;
     float span = 3.6f;
 
-    // Tier 1 (Ground along X): 2 logs resting flat on ground
-    float y1 = ground_y + r1;
+    // Tier 1 (Ground along X): 2 logs resting flat on ground with unequal radii and asymmetric cuts
+    float r0 = 1.32f;
+    float y0 = ground_y + r0;
     init_cylinder(&g_logs[0], 1,
-                  (Vec3){-5.0f, y1, -span}, (Vec3){5.0f, y1, -span},
-                  (Vec3){-5.0f, y1, -span}, (Vec3){5.0f, y1, -span},
-                  r1, 0.25f);
+                  (Vec3){-4.8f, y0, -span - 0.15f}, (Vec3){5.3f, y0, -span + 0.15f},
+                  (Vec3){-4.8f, y0, -span - 0.15f}, (Vec3){5.3f, y0, -span + 0.15f},
+                  r0, 0.25f);
+    g_logs[0].support_log1 = -1;
+    g_logs[0].support_log2 = -1;
+
+    float r1 = 1.18f;
+    float y1 = ground_y + r1;
     init_cylinder(&g_logs[1], 2,
-                  (Vec3){-5.0f, y1,  span}, (Vec3){5.0f, y1,  span},
-                  (Vec3){-5.0f, y1,  span}, (Vec3){5.0f, y1,  span},
+                  (Vec3){-5.2f, y1,  span + 0.20f}, (Vec3){4.6f, y1,  span - 0.10f},
+                  (Vec3){-5.2f, y1,  span + 0.20f}, (Vec3){4.6f, y1,  span - 0.10f},
                   r1, 0.25f);
+    g_logs[1].support_log1 = -1;
+    g_logs[1].support_log2 = -1;
 
     // Tier 2 (Resting across Tier 1 along Z): 2 logs
-    float y2 = y1 + r1 + r2 - 0.25f; // Notch contact
-    float y2_coll = ground_y + r2;   // When base burns out, drops to ground
+    float r2 = 1.10f;
+    float y2 = ground_y + fmaxf(r0, r1) + r2 - 0.15f;
+    float y2_coll = ground_y + r2;
     init_cylinder(&g_logs[2], 3,
-                  (Vec3){-span, y2, -5.0f}, (Vec3){-span, y2, 5.0f},
-                  (Vec3){-span, y2_coll, -4.5f}, (Vec3){-span, y2_coll, 4.5f},
-                  r2, 0.40f);
+                  (Vec3){-span - 0.20f, y2, -5.1f}, (Vec3){-span + 0.15f, y2, 4.7f},
+                  (Vec3){-span - 0.10f, y2_coll, -4.6f}, (Vec3){-span + 0.10f, y2_coll, 4.3f},
+                  r2, 0.35f);
+    g_logs[2].support_log1 = 0; // Supported by log 0
+    g_logs[2].support_log2 = 1; // Supported by log 1
+
+    float r3 = 1.26f;
+    float y3 = ground_y + fmaxf(r0, r1) + r3 - 0.15f;
+    float y3_coll = ground_y + r3;
     init_cylinder(&g_logs[3], 4,
-                  (Vec3){ span, y2, -5.0f}, (Vec3){ span, y2, 5.0f},
-                  (Vec3){ span, y2_coll, -4.5f}, (Vec3){ span, y2_coll, 4.5f},
-                  r2, 0.40f);
+                  (Vec3){ span - 0.10f, y3, -4.6f}, (Vec3){ span + 0.25f, y3, 5.3f},
+                  (Vec3){ span - 0.05f, y3_coll, -4.2f}, (Vec3){ span + 0.15f, y3_coll, 4.8f},
+                  r3, 0.35f);
+    g_logs[3].support_log1 = 0; // Supported by log 0
+    g_logs[3].support_log2 = 1; // Supported by log 1
 
     // Tier 3 (Cross diagonally across top): 2 logs
-    float y3 = y2 + r2 + r3 - 0.20f;
-    float y3_coll = ground_y + r3 + 0.3f;
+    float r4 = 0.92f;
+    float y4 = y2 + r2 + r4 - 0.15f;
+    float y4_coll = ground_y + r4 + 0.35f;
     init_cylinder(&g_logs[4], 5,
-                  (Vec3){-4.0f, y3, -3.0f}, (Vec3){4.0f, y3, 3.0f},
-                  (Vec3){-2.5f, y3_coll, -1.8f}, (Vec3){2.5f, y3_coll, 1.8f},
-                  r3, 0.60f);
+                  (Vec3){-3.8f, y4, -3.2f}, (Vec3){4.2f, y4, 2.7f},
+                  (Vec3){-2.2f, y4_coll, -1.6f}, (Vec3){2.4f, y4_coll, 1.4f},
+                  r4, 0.50f);
+    g_logs[4].support_log1 = 2; // Supported by Tier 2
+    g_logs[4].support_log2 = 3;
+
+    float r5 = 1.04f;
+    float y5 = y3 + r3 + r5 - 0.15f;
+    float y5_coll = ground_y + r5 + 0.30f;
     init_cylinder(&g_logs[5], 6,
-                  (Vec3){-4.0f, y3,  3.0f}, (Vec3){4.0f, y3, -3.0f},
-                  (Vec3){-2.5f, y3_coll,  1.8f}, (Vec3){2.5f, y3_coll, -1.8f},
-                  r3, 0.60f);
+                  (Vec3){-4.3f, y5,  2.8f}, (Vec3){3.9f, y5, -3.1f},
+                  (Vec3){-2.4f, y5_coll,  1.5f}, (Vec3){2.2f, y5_coll, -1.6f},
+                  r5, 0.50f);
+    g_logs[5].support_log1 = 2; // Supported by Tier 2
+    g_logs[5].support_log2 = 3;
 }
 
 // 2. TENDA CÔNICA (Teepee / Cone)
@@ -490,17 +572,22 @@ static void build_stack_teepee(void) {
     g_num_logs = 5;
     float ground_y = -4.2f;
     float base_r = 4.2f;
-    float apex_r = 0.6f;
+    float apex_r = 0.65f;
     float apex_y = 2.4f;
-    float r = 1.15f;
+
+    static const float radii[5] = { 1.08f, 1.25f, 1.14f, 1.22f, 1.05f };
+    static const float angle_offsets[5] = { 0.30f, 1.58f, 2.75f, 4.02f, 5.35f };
 
     for (int i = 0; i < 5; i++) {
-        float angle = (i * 2.0f * (float)M_PI / 5.0f) + 0.3f;
-        Vec3 p1 = {base_r * cosf(angle), ground_y + r, base_r * sinf(angle)};
-        Vec3 p2 = {apex_r * cosf(angle), apex_y, apex_r * sinf(angle)};
-        // Collapses inward toward center hearth
-        Vec3 p2_coll = {apex_r * 0.4f * cosf(angle), ground_y + r + 0.4f, apex_r * 0.4f * sinf(angle)};
+        float angle = angle_offsets[i];
+        float r = radii[i];
+        Vec3 p1 = { (base_r + 0.2f * sinf(i * 3.1f)) * cosf(angle), ground_y + r, (base_r + 0.2f * cosf(i * 2.7f)) * sinf(angle) };
+        Vec3 p2 = { apex_r * cosf(angle) + 0.08f * sinf(i * 1.5f), apex_y + 0.12f * cosf(i * 2.0f), apex_r * sinf(angle) };
+        Vec3 p2_coll = { apex_r * 0.35f * cosf(angle), ground_y + r + 0.35f, apex_r * 0.35f * sinf(angle) };
+
         init_cylinder(&g_logs[i], i + 1, p1, p2, p1, p2_coll, r, 0.45f);
+        g_logs[i].support_log1 = -1;
+        g_logs[i].support_log2 = -1;
     }
 }
 
@@ -508,35 +595,55 @@ static void build_stack_teepee(void) {
 static void build_stack_pyramid(void) {
     g_num_logs = 5;
     float ground_y = -4.2f;
-    float r_base = 1.35f;
-    float r_cross = 1.10f;
-    float y1 = ground_y + r_base;
+    float r_base0 = 1.38f;
+    float r_base1 = 1.26f;
+    float y1_0 = ground_y + r_base0;
+    float y1_1 = ground_y + r_base1;
 
-    // 2 Base logs
+    // 2 Base logs (slight asymmetry in length and position)
     init_cylinder(&g_logs[0], 1,
-                  (Vec3){-5.5f, y1, -2.5f}, (Vec3){5.5f, y1, -2.5f},
-                  (Vec3){-5.5f, y1, -2.5f}, (Vec3){5.5f, y1, -2.5f},
-                  r_base, 0.25f);
-    init_cylinder(&g_logs[1], 2,
-                  (Vec3){-5.5f, y1,  2.5f}, (Vec3){5.5f, y1,  2.5f},
-                  (Vec3){-5.5f, y1,  2.5f}, (Vec3){5.5f, y1,  2.5f},
-                  r_base, 0.25f);
+                  (Vec3){-5.4f, y1_0, -2.4f}, (Vec3){5.6f, y1_0, -2.6f},
+                  (Vec3){-5.4f, y1_0, -2.4f}, (Vec3){5.6f, y1_0, -2.6f},
+                  r_base0, 0.25f);
+    g_logs[0].support_log1 = -1;
+    g_logs[0].support_log2 = -1;
 
-    // 3 Leaning logs
+    init_cylinder(&g_logs[1], 2,
+                  (Vec3){-5.6f, y1_1,  2.6f}, (Vec3){5.2f, y1_1,  2.4f},
+                  (Vec3){-5.6f, y1_1,  2.6f}, (Vec3){5.2f, y1_1,  2.4f},
+                  r_base1, 0.25f);
+    g_logs[1].support_log1 = -1;
+    g_logs[1].support_log2 = -1;
+
+    // 3 Leaning logs with distinct thicknesses
     float y_apex = 2.2f;
-    float y_coll = ground_y + r_cross + 0.2f;
+    float r_cross2 = 1.08f;
+    float r_cross3 = 1.15f;
+    float r_cross4 = 1.12f;
+
+    float y_coll2 = ground_y + r_cross2 + 0.2f;
     init_cylinder(&g_logs[2], 3,
-                  (Vec3){-4.2f, y1 + r_base - 0.2f, -1.0f}, (Vec3){0.0f, y_apex, -0.2f},
-                  (Vec3){-4.0f, y_coll, -0.6f}, (Vec3){0.0f, y_coll, -0.1f},
-                  r_cross, 0.50f);
+                  (Vec3){-4.2f, y1_0 + r_base0 - 0.2f, -1.1f}, (Vec3){-0.1f, y_apex + 0.1f, -0.2f},
+                  (Vec3){-3.8f, y_coll2, -0.6f}, (Vec3){-0.1f, y_coll2, -0.1f},
+                  r_cross2, 0.50f);
+    g_logs[2].support_log1 = 0;
+    g_logs[2].support_log2 = -1;
+
+    float y_coll3 = ground_y + r_cross3 + 0.2f;
     init_cylinder(&g_logs[3], 4,
-                  (Vec3){ 4.2f, y1 + r_base - 0.2f, -1.0f}, (Vec3){0.0f, y_apex, -0.2f},
-                  (Vec3){ 4.0f, y_coll, -0.6f}, (Vec3){0.0f, y_coll, -0.1f},
-                  r_cross, 0.50f);
+                  (Vec3){ 4.3f, y1_0 + r_base0 - 0.2f, -0.9f}, (Vec3){ 0.1f, y_apex, -0.3f},
+                  (Vec3){ 3.9f, y_coll3, -0.6f}, (Vec3){ 0.1f, y_coll3, -0.1f},
+                  r_cross3, 0.50f);
+    g_logs[3].support_log1 = 0;
+    g_logs[3].support_log2 = -1;
+
+    float y_coll4 = ground_y + r_cross4 + 0.2f;
     init_cylinder(&g_logs[4], 5,
-                  (Vec3){ 0.0f, y1 + r_base - 0.2f,  3.0f}, (Vec3){0.0f, y_apex,  0.4f},
-                  (Vec3){ 0.0f, y_coll,  2.4f}, (Vec3){0.0f, y_coll,  0.2f},
-                  r_cross, 0.50f);
+                  (Vec3){ 0.2f, y1_1 + r_base1 - 0.2f,  3.1f}, (Vec3){ 0.0f, y_apex + 0.15f, 0.4f},
+                  (Vec3){ 0.1f, y_coll4,  2.3f}, (Vec3){ 0.0f, y_coll4,  0.2f},
+                  r_cross4, 0.50f);
+    g_logs[4].support_log1 = 1;
+    g_logs[4].support_log2 = -1;
 }
 
 static void init_scene(void) {
@@ -727,53 +834,81 @@ static void update_simulation(void) {
         kindle_heat = fmaxf(0.0f, 1.0f - (g_sim_time / 22.0f));
     }
 
-    // Update each log segment
+    // -------------------------------------------------------------------------
+    // HETEROGENEOUS PIECE-BY-PIECE COMBUSTION WITH RADIAL CORE DRAFT
+    // -------------------------------------------------------------------------
     for (int i = 0; i < g_num_logs; i++) {
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
             Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
 
-            // Heat from initial kindling nest
+            // Radial distance from hearth center axis (0, y, 0)
+            float r_seg = sqrtf(seg_p.x * seg_p.x + seg_p.z * seg_p.z);
+            // Core chimney convective draft factor: intense at center, zero at outer ends
+            float r_norm = r_seg / 3.6f;
+            float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+
+            // 1. Initial kindling nest heat (concentrated in center core)
             if (kindle_heat > 0.05f) {
                 float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
-                float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.6f);
-                if (d_surf < 2.8f) {
-                    g_logs[i].segments[s].temp += 0.015f * (1.0f - d_surf / 2.8f) * kindle_heat * g_time_scale;
+                float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.5f);
+                if (d_surf < 2.5f) {
+                    g_logs[i].segments[s].temp += 0.018f * (1.0f - d_surf / 2.5f) * kindle_heat * eta_r * g_time_scale;
                 }
             }
 
-            // Cross-log fire radiation from burning segments
+            // 2. Ash bed radiant ember heat (fuels logs from below in center)
+            if (g_ash_bed.heat > 0.15f && seg_p.y < 0.2f) {
+                float bed_dy = fmaxf(0.0f, seg_p.y - g_ash_bed.center.y);
+                if (bed_dy < 3.2f) {
+                    float bed_fac = (1.0f - bed_dy / 3.2f) * eta_r;
+                    g_logs[i].segments[s].temp += 0.005f * g_ash_bed.heat * bed_fac * g_time_scale;
+                }
+            }
+
+            // 3. Cross-log fire radiation from actively burning segments within draft core
             for (int j = 0; j < g_num_logs; j++) {
                 if (i == j) continue;
                 for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
-                    if (g_logs[j].segments[sj].temp > 0.35f) {
+                    if (g_logs[j].segments[sj].temp > 0.38f && g_logs[j].segments[sj].structural_mass > 0.10f) {
                         float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
                         Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
                         float d_cross = vec3_len(vec3_sub(seg_p, pj));
                         float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
-                        if (d_cross_surf < 1.8f) {
-                            g_logs[i].segments[s].temp += 0.005f * (1.0f - d_cross_surf / 1.8f) * g_time_scale;
+                        if (d_cross_surf < 1.3f) {
+                            float rad_power = (1.0f - d_cross_surf / 1.3f) * (0.25f + 0.75f * eta_r);
+                            g_logs[i].segments[s].temp += 0.004f * rad_power * g_time_scale;
                         }
                     }
                 }
             }
 
-            // Internal conduction along wood grain
+            // 4. Conservative 1D thermal diffusion along wood grain (slow heat creep)
             float cur = g_logs[i].segments[s].temp;
             float prev_t = (s > 0) ? g_logs[i].segments[s-1].temp : cur;
             float next_t = (s < NUM_LOG_SEGS - 1) ? g_logs[i].segments[s+1].temp : cur;
-            if (prev_t > 0.35f || next_t > 0.35f) {
-                g_logs[i].segments[s].temp += 0.0035f * g_time_scale;
-            }
+            float laplacian = prev_t - 2.0f * cur + next_t;
+            g_logs[i].segments[s].temp += 0.0016f * laplacian * g_time_scale;
 
-            // If temperature exceeds ignition threshold, start burning!
+            // 5. Ambient convective cooling (outer ends exposed to cold air cool down rapidly)
+            float cool_factor = 1.0f - 0.75f * eta_r;
+            g_logs[i].segments[s].temp -= 0.0022f * cur * cool_factor * g_time_scale;
+
+            // 6. Active combustion & calcification: sustained only if hot and fueled by draft
             if (g_logs[i].segments[s].temp > 0.35f) {
-                g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + 0.004f * g_time_scale);
-                g_logs[i].segments[s].burn_progress += 0.00045f * g_time_scale;
-                g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.15f);
+                if (eta_r > 0.05f) {
+                    g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + 0.0035f * eta_r * g_time_scale);
+                    float burn_rate = 0.00042f * (g_logs[i].segments[s].temp - 0.30f) * (0.20f + 0.80f * eta_r);
+                    g_logs[i].segments[s].burn_progress += burn_rate * g_time_scale;
+                } else {
+                    g_logs[i].segments[s].burn_progress += 0.00008f * g_time_scale;
+                }
 
-                // Shed ash flakes as segment crumbles
-                if (g_logs[i].segments[s].burn_progress > 0.60f && rand_f() < 0.05f) {
+                // Update physical structural mass
+                g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.25f);
+
+                // Shed ash flakes as segment becomes crumbly
+                if (g_logs[i].segments[s].burn_progress > 0.60f && rand_f() < 0.04f) {
                     float angle = rand_f() * 6.28318f;
                     Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
                                             vec3_scale(g_logs[i].bitangent, sinf(angle)));
@@ -787,15 +922,16 @@ static void update_simulation(void) {
                 }
             }
 
-            // Depletion after heavy burning (turns to ash embers)
+            // Calcification and fuel depletion
             if (g_logs[i].segments[s].burn_progress > 0.85f) {
-                g_logs[i].segments[s].temp = fmaxf(0.15f, g_logs[i].segments[s].temp - 0.001f * g_time_scale);
+                g_logs[i].segments[s].temp = fmaxf(0.12f, g_logs[i].segments[s].temp - 0.0012f * g_time_scale);
             }
+            if (g_logs[i].segments[s].temp < 0.0f) g_logs[i].segments[s].temp = 0.0f;
         }
     }
 
     // -------------------------------------------------------------------------
-    // SELF-COLLAPSE PHYSICS & 3D ASH BED ACCUMULATION
+    // ASYNCHRONOUS SEGMENT-DRIVEN COLLAPSE PHYSICS
     // -------------------------------------------------------------------------
     float total_mass = 0.0f;
     int total_segs = g_num_logs * NUM_LOG_SEGS;
@@ -819,19 +955,46 @@ static void update_simulation(void) {
         g_ash_bed.heat = fmaxf(0.12f, g_ash_bed.heat - 0.0003f * g_time_scale);
     }
 
-    float collapse_factor = fmaxf(0.0f, 1.0f - avg_mass);
-    if (g_force_collapse) collapse_factor = 1.0f;
-
+    // Individual collapse calculation per log based on supporting contacts & core mass
     for (int i = 0; i < g_num_logs; i++) {
-        float log_mass = 0.0f;
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            log_mass += g_logs[i].segments[s].structural_mass;
+        float support_integrity = 1.0f;
+        if (g_logs[i].support_log1 >= 0 && g_logs[i].support_log1 < g_num_logs) {
+            int s1 = g_logs[i].support_log1;
+            float s1_m = (g_logs[s1].segments[3].structural_mass + g_logs[s1].segments[8].structural_mass) * 0.5f;
+            float s1_eff = s1_m * (1.0f - g_logs[s1].collapse_cur * 0.65f);
+            support_integrity = fminf(support_integrity, s1_eff);
         }
-        float log_loss = 1.0f - (log_mass / (float)NUM_LOG_SEGS);
-        float c = fmaxf(collapse_factor * 0.75f, log_loss);
-        if (g_force_collapse) c = 1.0f;
-        if (c > 1.0f) c = 1.0f;
+        if (g_logs[i].support_log2 >= 0 && g_logs[i].support_log2 < g_num_logs) {
+            int s2 = g_logs[i].support_log2;
+            float s2_m = (g_logs[s2].segments[3].structural_mass + g_logs[s2].segments[8].structural_mass) * 0.5f;
+            float s2_eff = s2_m * (1.0f - g_logs[s2].collapse_cur * 0.65f);
+            support_integrity = fminf(support_integrity, s2_eff);
+        }
 
+        // Own central segments integrity (segments 4, 5, 6 in the hottest center)
+        float own_center_mass = (g_logs[i].segments[4].structural_mass + g_logs[i].segments[5].structural_mass + g_logs[i].segments[6].structural_mass) / 3.0f;
+        float log_integrity = fminf(support_integrity, own_center_mass);
+
+        // When integrity drops below critical break threshold, collapse triggers
+        float target_c = 0.0f;
+        if (g_force_collapse) {
+            target_c = 1.0f;
+        } else if (log_integrity < 0.45f) {
+            target_c = (0.45f - log_integrity) / 0.45f;
+            if (target_c > 1.0f) target_c = 1.0f;
+        }
+
+        // Dynamic gravitational settling
+        if (target_c > g_logs[i].collapse_cur) {
+            g_logs[i].collapse_speed += 0.0020f * g_time_scale;
+            g_logs[i].collapse_cur += g_logs[i].collapse_speed;
+            if (g_logs[i].collapse_cur >= target_c) {
+                g_logs[i].collapse_cur = target_c;
+                g_logs[i].collapse_speed = 0.0f;
+            }
+        }
+
+        float c = g_logs[i].collapse_cur;
         g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
         g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
         g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
@@ -886,27 +1049,36 @@ static void update_simulation(void) {
         }
     }
 
-    // 2. Heat anchored exclusively to burning wood segments!
+    // 2. Heat anchored exclusively to burning wood segments inside the core draft!
     for (int i = 0; i < g_num_logs; i++) {
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             float temp = g_logs[i].segments[s].temp;
-            if (temp > 0.40f) {
+            if (temp > 0.38f) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+
+                // Radial draft factor
+                float r_seg = sqrtf(p.x * p.x + p.z * p.z);
+                float r_norm = r_seg / 3.4f;
+                float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+
+                // Only segments within the central chimney generate tall flames!
+                if (eta_r <= 0.08f) continue;
+
                 Vec3 rel_p = vec3_sub(p, cam_pos);
                 int px = (int)(((vec3_dot(rel_p, right) / world_w) + 0.5f) * g_pixel_w);
                 int py = (int)((0.5f - (vec3_dot(rel_p, up) / world_h)) * g_pixel_h);
                 float pz = vec3_dot(rel_p, fwd);
 
-                float flame_h = temp * 0.95f;
+                float flame_h = temp * (0.25f + 0.75f * eta_r) * 1.05f;
                 for (int dy = -3; dy <= 1; dy++) {
                     for (int dx = -3; dx <= 3; dx++) {
                         int sx = px + dx;
                         int sy = py + dy;
                         if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
                             float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
-                            if (d < 3.0f) {
-                                float val = flame_h * (1.0f - d / 3.0f);
+                            if (d < 3.2f) {
+                                float val = flame_h * (1.0f - d / 3.2f);
                                 g_fire_heat[sy][sx] = fmaxf(g_fire_heat[sy][sx], val);
                                 g_fire_z[sy][sx] = pz - 0.25f;
                             }
@@ -1051,7 +1223,7 @@ static void render_scene(void) {
             for (int i = 0; i < g_num_stones; i++) {
                 float t;
                 Vec3 pt, norm;
-                if (intersect_sphere(&g_stones[i], ray_orig, ray_dir, &t, &pt, &norm)) {
+                if (intersect_stone(&g_stones[i], ray_orig, ray_dir, &t, &pt, &norm)) {
                     if (t < closest_t) {
                         closest_t = t;
                         stone_pt = pt;
@@ -1117,7 +1289,7 @@ static void render_scene(void) {
                 float s_val = ndotl * atten * light_intensity * 2.2f + ambient;
 
                 float rock_noise = (sinf(stone_pt.x * 3.5f + stone_pt.z * 4.1f) * 0.5f + 0.5f) * 0.18f;
-                int s_idx = (int)((s_val + rock_noise) * 2.8f);
+                int s_idx = (int)((s_val + rock_noise + hit_stone->shade_var) * 2.8f);
                 if (s_idx < 1) s_idx = 1;
                 if (s_idx > 5) s_idx = 5;
                 g_shade_buf[y][x] = PALETTE_STONE[s_idx];

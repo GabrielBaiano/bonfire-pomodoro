@@ -263,3 +263,48 @@ In real campfires, ash is a delicate powdery residue that settles on the upward-
 - **Underside ($\hat{N}_y < -0.1$)**: Ash flakes shed off into the fire below, leaving the black charred charcoal crust (`PALETTE_CHARRED`).
 - **Crevices / Furrows**: Deep grooves retain incandescent glowing embers (`PALETTE_EMBERS`), preserving the structural volume and silhouette of the burning firewood.
 
+---
+
+## 12. Natural Interlocking Stones, Irregular Firewood, Core Draft & Independent Collapse
+
+![Natural Stone Ring & Independent Collapse Stages](media/natural_stone_segmented_stages.png)
+
+### 1. Anisotropic Interlocking Stone Ring (`Stone3D`)
+Spherical bead approximations produce artificial, disconnected rings. The hearth containment wall is built from $N_{\text{stones}} = 16$ oriented fieldstone ellipsoids:
+- **Local Orthonormal Frame**: For stone $i$ at angle $\theta_i$, local axes align with the ring perimeter:
+  $$\hat{U}_{\text{tan}} = (-\sin\theta_i, 0, \cos\theta_i), \quad \hat{V}_{\text{up}} = (0, 1, 0), \quad \hat{W}_{\text{rad}} = (\cos\theta_i, 0, \sin\theta_i)$$
+- **Anisotropic Semi-Axes**: Elongated along the perimeter ($R_u \approx 1.45$), flattened vertically ($R_v \approx 0.78$), and deep radially ($R_w \approx 1.10$). Adjacent stones touch and interlock seamlessly, forming an organic circular containment wall.
+- **Analytical Ray Intersection**: The ray is transformed into the stone's unit-sphere space via dot products with $(\hat{U}, \hat{V}, \hat{W})$ scaled by $(1/R_u, 1/R_v, 1/R_w)$. World normals are reconstructed by projecting the local normal back through the oriented frame.
+- **Mineral Variety**: Each rock carries an individual shade perturbation scalar (`shade_var`), giving subtle slate, granite, and sandstone tonal variety.
+
+### 2. Irregular, Organic Firewood Stacks
+Campfire firewood consists of hand-cut, split logs with natural variation:
+- **Log Cabin (Cribbing)**: Asymmetric tier log diameters ($R \in [0.92, 1.32]$), non-uniform cut lengths ($9.1$ to $10.6$), and slight angular yaw tilts ($\pm 2.5^\circ$ to $4^\circ$).
+- **Teepee**: 5 leaning poles with randomized radii and asymmetric apex grouping leaning against a dominant primary trunk.
+- **Pyramid / Lean-to**: Ground base trunks of unequal gauge ($R = 1.38$ and $1.26$) supporting leaning logs that overhang unevenly.
+
+### 3. Central Chimney Draft & Localized Combustion ($\eta(r)$)
+In real hearths, convective updraft pulls fresh air into the fire from all sides, creating an intense central chimney draft while outer ends remain cool:
+- **Radial Draft Factor**:
+  $$\eta(r) = \max\left(0, 1 - \left(\frac{r_{\text{seg}}}{3.6}\right)^2\right), \quad r_{\text{seg}} = \sqrt{x^2 + z^2}$$
+- **Slow 1D Grain Diffusion**: Replaces runaway additive jumps with conservative 1D thermal diffusion along adjacent segments:
+  $$\Delta T_{\text{diff}}(s) = k_{\text{diff}} (T(s - 1) - 2T(s) + T(s + 1))$$
+- **Ambient Convective Cooling**:
+  $$\Delta T_{\text{cool}} = -k_{\text{cool}} \cdot T(s) \cdot (1 - 0.75 \eta(r))$$
+  Outer log segments ($r > 3.6$, $\eta(r) = 0$) cool down into ambient air faster than diffusion can heat them, preventing ignition and keeping outer ends as raw, intact oak wood throughout the fire's life.
+- **Core-Anchored Flames**: Fire fluid injection is modulated by $\eta(r)$. Segments outside the draft zone emit zero vertical flame columns, concentrating the visible roaring fire strictly within the central hearth chimney ($r < 3.2$).
+
+### 4. Independent, Segment-Driven Collapse Kinematics
+Instead of a uniform global lerp, each log tracks its own mechanical integrity and physical collapse progression:
+- **Support Graph**:
+  - Ground tier logs (`support = -1`) remain grounded until central segments lose mass.
+  - Tier 2 logs monitor support at contact points on underlying Tier 1 logs.
+  - Tier 3 logs monitor support on Tier 2 logs.
+- **Fracture Trigger**: When local support integrity or a log's own central segments ($s \in [4, 6]$) drop below critical threshold ($< 0.45$), the log loses structural equilibrium.
+- **Gravitational Settling**: The log accelerates downward with independent settling velocity:
+  $$\vec{P}(t) = \vec{P}_{\text{orig}} (1 - c_i) + \vec{P}_{\text{collapsed}} c_i, \quad c_i \in [0, 1]$$
+  Logs tip, tilt, and drop asynchronously into the glowing ember bed as specific supporting wood burns away.
+
+![3D Camera Orbit with Natural Stones and Centered Flame](media/natural_stone_orbit_views.png)
+
+
