@@ -1,0 +1,6 @@
+fireplace
+*.o
+*.ppm
+__pycache__/
+*.pyc
+.DS_Store
