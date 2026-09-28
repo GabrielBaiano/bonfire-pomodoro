@@ -102,6 +102,53 @@ class Stone3D:
         norm = [(pt[0] - self.center[0]) * inv_r, (pt[1] - self.center[1]) * inv_r, (pt[2] - self.center[2]) * inv_r]
         return t, pt, norm
 
+class AshBed3D:
+    def __init__(self, ground_y=-4.2, radius_xz=5.6, height=0.35):
+        self.center = [0.0, ground_y, 0.0]
+        self.radius_xz = radius_xz
+        self.height = height
+        self.heat = 0.35
+        self.volume = 0.0
+
+    def intersect(self, ro, rd):
+        if self.height < 0.08:
+            return None
+        inv_r = 1.0 / self.radius_xz
+        inv_h = 1.0 / self.height
+
+        p0 = [(ro[0] - self.center[0]) * inv_r, (ro[1] - self.center[1]) * inv_h, (ro[2] - self.center[2]) * inv_r]
+        d0 = [rd[0] * inv_r, rd[1] * inv_h, rd[2] * inv_r]
+
+        a = d0[0]*d0[0] + d0[1]*d0[1] + d0[2]*d0[2]
+        b = p0[0]*d0[0] + p0[1]*d0[1] + p0[2]*d0[2]
+        c = (p0[0]*p0[0] + p0[1]*p0[1] + p0[2]*p0[2]) - 1.0
+        disc = b * b - a * c
+        if disc < 0:
+            return None
+        sdisc = math.sqrt(disc)
+        t1 = (-b - sdisc) / a
+        t2 = (-b + sdisc) / a
+        hit_t = -1.0
+        if t1 > 0.1:
+            pt1_y = ro[1] + t1 * rd[1]
+            if pt1_y >= self.center[1] - 0.05:
+                hit_t = t1
+        if hit_t < 0 and t2 > 0.1:
+            pt2_y = ro[1] + t2 * rd[1]
+            if pt2_y >= self.center[1] - 0.05:
+                hit_t = t2
+        if hit_t < 0.1:
+            return None
+        pt = [ro[0] + hit_t * rd[0], ro[1] + hit_t * rd[1], ro[2] + hit_t * rd[2]]
+        n_raw = [
+            (pt[0] - self.center[0]) * (inv_r * inv_r),
+            max(0.08, pt[1] - self.center[1]) * (inv_h * inv_h),
+            (pt[2] - self.center[2]) * (inv_r * inv_r)
+        ]
+        n_len = math.sqrt(n_raw[0]*n_raw[0] + n_raw[1]*n_raw[1] + n_raw[2]*n_raw[2])
+        norm = [n_raw[0] / n_len, n_raw[1] / n_len, n_raw[2] / n_len]
+        return hit_t, pt, norm
+
 class SegmentedCylinder3D:
     def __init__(self, obj_id, p1, p2, p1_collapsed, p2_collapsed, radius, charred=0.3):
         self.obj_id = obj_id
@@ -317,7 +364,7 @@ def main():
     fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
     next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
     fire_z = [[0.0 for _ in range(pw)] for _ in range(ph)]
-    settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
+    ash_bed = AshBed3D()
 
     sparks = []
     ash_flakes = []
@@ -332,7 +379,6 @@ def main():
                 fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 next_fire = [[0.0 for _ in range(pw)] for _ in range(ph)]
                 fire_z = [[0.0 for _ in range(pw)] for _ in range(ph)]
-                settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
                 sys.stdout.write("\033[2J")
         except Exception:
             pass
@@ -371,7 +417,7 @@ def main():
                 sim_time = 0.0
                 force_collapse = False
                 fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
-                settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
+                ash_bed = AshBed3D()
                 sparks.clear()
                 ash_flakes.clear()
             elif ch in ('t', 'T'):
@@ -387,7 +433,7 @@ def main():
                 force_collapse = False
                 logs = stack_funcs[stack_mode]()
                 fire_heat = [[0.0 for _ in range(pw)] for _ in range(ph)]
-                settled_ash = [[0 for _ in range(pw)] for _ in range(ph)]
+                ash_bed = AshBed3D()
                 sparks.clear()
                 ash_flakes.clear()
             elif ch in ('c', 'C'):
@@ -437,19 +483,32 @@ def main():
                         l.burn_progress[s] += 0.00045 * time_scale
                         l.structural_mass[s] = max(0.0, 1.0 - l.burn_progress[s] * 1.15)
 
-                        if l.burn_progress[s] > 0.65 and random.random() < 0.06:
-                            ash_p = list(seg_p)
-                            ash_p[1] += l.radius * 0.9
-                            vel = [(random.random() - 0.5) * 0.5 + wind * 0.4, -(random.random() * 0.4 + 0.2), (random.random() - 0.5) * 0.5]
-                            ash_flakes.append([ash_p[0], ash_p[1], ash_p[2], vel[0], vel[1], vel[2], PALETTE_ASH[random.choice([1, 2, 3])]])
+                        if l.burn_progress[s] > 0.60 and random.random() < 0.05:
+                            ang = random.random() * 6.28318
+                            rad_dir = [
+                                l.tangent[k] * math.cos(ang) + l.bitangent[k] * math.sin(ang)
+                                for k in range(3)
+                            ]
+                            ash_p = [seg_p[k] + rad_dir[k] * l.radius * 0.95 for k in range(3)]
+                            vel = [(random.random() - 0.5) * 0.3 + wind * 0.3, -(random.random() * 0.25 + 0.15), (random.random() - 0.5) * 0.3]
+                            ash_flakes.append([ash_p[0], ash_p[1], ash_p[2], vel[0], vel[1], vel[2], PALETTE_ASH[random.choice([2, 3])]])
 
                     if l.burn_progress[s] > 0.85:
                         l.temp[s] = max(0.15, l.temp[s] - 0.001 * time_scale)
 
-            # Self-collapse physics
+            # Self-collapse physics & 3D ash bed accumulation
             total_mass = sum(l.structural_mass[s] for l in logs for s in range(NUM_LOG_SEGS))
             total_segs = len(logs) * NUM_LOG_SEGS
+            active_burning = sum(1 for l in logs for s in range(NUM_LOG_SEGS) if l.temp[s] > 0.35)
             avg_mass = total_mass / float(total_segs)
+            burnt_mass = 1.0 - avg_mass
+
+            ash_bed.height = min(1.4, 0.35 + burnt_mass * 0.85 + ash_bed.volume)
+            if active_burning > 0:
+                ash_bed.heat = min(1.0, ash_bed.heat + 0.003 * time_scale)
+            elif sim_time > 25.0:
+                ash_bed.heat = max(0.12, ash_bed.heat - 0.0003 * time_scale)
+
             collapse_factor = max(0.0, 1.0 - avg_mass)
             if force_collapse: collapse_factor = 1.0
 
@@ -585,14 +644,17 @@ def main():
 
             alive_flakes = []
             for f in ash_flakes:
-                f[0] += f[3] * 0.05 + math.sin(f[1] * 2.0 + sim_time) * 0.02
-                f[1] += f[4] * 0.05
-                f[2] += f[5] * 0.05
-                if f[1] <= -4.15:
-                    sx, sy, _ = project_pt([f[0], f[1], f[2]])
-                    ix, iy = int(sx), int(sy)
-                    if 0 <= ix < pw and 0 <= iy < ph:
-                        settled_ash[iy][ix] = 1
+                f[0] += f[3] * 0.04 + math.sin(f[1] * 1.5 + sim_time) * 0.015
+                f[1] += f[4] * 0.04
+                f[2] += f[5] * 0.04
+                r_sq = f[0]*f[0] + f[2]*f[2]
+                r_bed = ash_bed.radius_xz
+                bed_h = (ash_bed.height * math.sqrt(max(0.0, 1.0 - r_sq / (r_bed * r_bed)))) if r_sq < r_bed * r_bed else 0.0
+                floor_y = -4.2 + bed_h
+                if f[1] <= floor_y:
+                    if r_sq < r_bed * r_bed:
+                        ash_bed.volume += 0.002
+                        ash_bed.height = min(1.4, 0.35 + ash_bed.volume)
                 else:
                     alive_flakes.append(f)
             ash_flakes = alive_flakes
@@ -641,6 +703,13 @@ def main():
                         hit_data = (res, l)
                         hit_type = 'log'
 
+                # Test ash bed
+                res = ash_bed.intersect(ro, rd)
+                if res and res[0] < closest_t:
+                    closest_t = res[0]
+                    hit_data = (res, ash_bed)
+                    hit_type = 'ash_bed'
+
                 if hit_type == 'stone':
                     res, st = hit_data
                     t, pt, norm = res
@@ -686,35 +755,84 @@ def main():
                         num_plates_v = l.length * 2.2
                         u_plate = math.floor(u * num_plates_u)
                         v_plate = math.floor(v * num_plates_v)
-                        plate_hash = math.sin(u_plate * 12.9898 + v_plate * 78.233) * 43758.5453
-                        plate_var = (plate_hash - math.floor(plate_hash)) * 0.25 - 0.12
 
                         u_frac = (u * num_plates_u) - u_plate
                         v_frac = (v * num_plates_v) - v_plate
                         is_furrow = (u_frac < 0.12 or u_frac > 0.88 or (v_frac < 0.08 and (u_plate % 2 == 0)))
 
-                        if burn > 0.75:
-                            ash_idx = min(4, max(0, int((lval + plate_var) * 2.4)))
-                            shade_buf[y][x] = PALETTE_ASH[ash_idx]
+                        if burn > 0.70:
+                            if is_furrow:
+                                if seg_temp > 0.30:
+                                    emb_idx = min(3, max(0, int(seg_temp * 3.5)))
+                                    shade_buf[y][x] = PALETTE_EMBERS[emb_idx]
+                                else:
+                                    shade_buf[y][x] = PALETTE_CHARRED[0]
+                            else:
+                                up_factor = norm[1]
+                                if up_factor > 0.25:
+                                    ash_idx = min(4, max(2, int(lval * 2.0 + 1.8)))
+                                    shade_buf[y][x] = PALETTE_ASH[ash_idx]
+                                elif up_factor > -0.1:
+                                    ash_idx = min(3, max(1, int(lval * 1.8 + 0.9)))
+                                    shade_buf[y][x] = PALETTE_ASH[ash_idx]
+                                else:
+                                    c_idx = min(2, max(0, int(lval * 1.8)))
+                                    shade_buf[y][x] = PALETTE_CHARRED[c_idx]
                         elif burn > 0.40:
-                            if is_furrow and seg_temp > 0.50:
+                            if is_furrow and seg_temp > 0.40:
                                 emb_idx = min(3, max(0, int(seg_temp * 3.5)))
                                 shade_buf[y][x] = PALETTE_EMBERS[emb_idx]
                             else:
-                                c_idx = min(4, max(0, int((lval + plate_var) * 2.0)))
-                                shade_buf[y][x] = PALETTE_CHARRED[c_idx]
+                                if burn > 0.55 and norm[1] > 0.45:
+                                    shade_buf[y][x] = PALETTE_ASH[1]
+                                else:
+                                    c_idx = min(4, max(0, int(lval * 2.0)))
+                                    shade_buf[y][x] = PALETTE_CHARRED[c_idx]
                         elif burn > 0.15:
                             if is_furrow:
                                 shade_buf[y][x] = PALETTE_CHARRED[0]
                             else:
-                                b_idx = min(4, max(1, int((lval + plate_var) * 2.0)))
+                                b_idx = min(4, max(1, int(lval * 2.0)))
                                 shade_buf[y][x] = PALETTE_WOOD[b_idx]
                         else:
                             if is_furrow:
                                 shade_buf[y][x] = PALETTE_WOOD[0]
                             else:
-                                b_idx = min(6, max(1, int((lval + plate_var) * 2.8)))
+                                b_idx = min(6, max(1, int(lval * 2.8)))
                                 shade_buf[y][x] = PALETTE_WOOD[b_idx]
+
+                elif hit_type == 'ash_bed':
+                    res, ab = hit_data
+                    t, pt, norm = res
+                    id_buf[y][x] = 500
+                    depth_buf[y][x] = (pt[0]-cam_pos[0])*fwd[0] + (pt[1]-cam_pos[1])*fwd[1] + (pt[2]-cam_pos[2])*fwd[2]
+
+                    l_vec = [light_pos[k] - pt[k] for k in range(3)]
+                    ldist = math.sqrt(sum(k*k for k in l_vec)) + 1e-6
+                    ldir = [k / ldist for k in l_vec]
+                    atten = 1.0 / (1.0 + 0.08 * ldist + 0.015 * ldist * ldist)
+                    ndotl = max(0.0, sum(norm[k] * ldir[k] for k in range(3)))
+                    ambient = 0.24 + 0.12 * max(0.0, norm[1])
+                    s_val = ndotl * atten * light_intensity * 2.2 + ambient
+
+                    r_core = math.sqrt(pt[0]*pt[0] + pt[2]*pt[2])
+                    core_heat = ab.heat * max(0.0, 1.0 - r_core / 4.8)
+
+                    f1 = math.sin(pt[0] * 1.3 + pt[2] * 0.7)
+                    f2 = math.cos(pt[2] * 1.4 - pt[0] * 0.6)
+                    fissure = abs(f1 * f2)
+
+                    if fissure < 0.18 and core_heat > 0.22:
+                        emb_idx = min(3, max(0, int(core_heat * 3.8)))
+                        shade_buf[y][x] = PALETTE_EMBERS[emb_idx]
+                    else:
+                        if r_core < 1.8 and core_heat > 0.35:
+                            ash_idx = min(2, max(1, int(s_val * 1.6)))
+                        elif r_core < 3.8:
+                            ash_idx = min(3, max(2, int(s_val * 2.2)))
+                        else:
+                            ash_idx = min(4, max(2, int(s_val * 2.6)))
+                        shade_buf[y][x] = PALETTE_ASH[ash_idx]
 
         # 1-Pixel Cel Outline
         for y in range(ph):
@@ -735,7 +853,7 @@ def main():
                             break
 
                 if is_edge:
-                    frame_col[y][x] = (18, 14, 12)
+                    frame_col[y][x] = PALETTE_ASH[0] if cid == 500 else (18, 14, 12)
                     frame_sky[y][x] = False
                 else:
                     frame_col[y][x] = shade_buf[y][x]
@@ -759,13 +877,6 @@ def main():
                     else:
                         frame_col[y][x] = fcol
                         frame_sky[y][x] = False
-
-        # Settled ash
-        for y in range(ph):
-            for x in range(pw):
-                if settled_ash[y][x]:
-                    frame_col[y][x] = PALETTE_ASH[2 if (x+y)%2 == 0 else 3]
-                    frame_sky[y][x] = False
 
         # Flakes
         for f in ash_flakes:

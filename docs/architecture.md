@@ -181,6 +181,7 @@ $$u_{\text{plate}} = \lfloor u \times 14 \rfloor, \quad v_{\text{plate}} = \lflo
 | Fire spawning out of the ground | Residual hardcoded heat disc at floor elevation $Y = -4.2f$ | Removed floor heat injection entirely; fire anchors strictly to kindle bundle $(0, -2.6, 0)$ and burning wood segments ($T > 0.35$). |
 | Firewood burning as a single monolithic block | Single global burn progress per log caused uniform discoloration | Discretized each log into $N_{\text{seg}} = 10$ axial cells with independent heat conduction, charring, ash degradation, and mass loss. |
 | Bonfire floating on bare ground without containment | Absence of physical containment structure | Added 10 rounded 3D stones in a circular fire ring at $R = 7.0$ resting on the ground plane with stone palette and firelight reflections. |
+| Ash appearing as random noise / TV static | 2D screen buffer `g_settled_ash` stamped checkerboard pixels and pseudo-random hash `plate_hash` scattered salt-and-pepper dots | Replaced with analytical 3D dome mound (`AshBed3D`) with coherent ember fissures, and gravity-settled wood ash mantle on top surfaces ($N_y > 0$). |
 
 ---
 
@@ -238,3 +239,27 @@ When average structural mass $\bar{M} = \frac{1}{N} \sum M_i$ drops below critic
 1. **Sagging ($0.45 < \bar{M} \le 0.75$)**: Top tiers sag downward, resting notches deepen.
 2. **Structural Fracture ($0.25 < \bar{M} \le 0.45$)**: Weakened segments lose cantilever support; logs rotate around ground contact points toward the central hearth floor.
 3. **Full Collapse ($\bar{M} \le 0.25$)**: All consumed logs settle flat onto ground plane ($Y = -4.2$), forming a glowing ember bed enclosed by the stone ring.
+
+---
+
+## 11. Physical 3D Ash Bed & Gravity-Settled Wood Ash Mantle
+
+![Realistic Ash Stages](media/realistic_ash_stages.png)
+
+### 1. Eliminating Pseudo-Random Ash Noise
+Earlier prototypes used a pseudo-random hash function (`plate_hash = sin(u * 12.98 + v * 78.23) * 43758.54`) and a 2D screen buffer (`g_settled_ash[sy][sx]`). This generated high-frequency salt-and-pepper noise and static screen-space dots that drifted unnaturally during camera orbit.
+
+### 2. Analytical 3D Hearth Ash Bed (`AshBed3D`)
+The hearth bed inside the stone ring is modeled as an analytical 3D ellipsoid dome:
+$$\frac{x^2}{R_{\text{bed}}^2} + \frac{(y - Y_{\text{ground}})^2}{H_{\text{bed}}^2} + \frac{z^2}{R_{\text{bed}}^2} \le 1, \quad y \ge Y_{\text{ground}}$$
+- **Radius**: $R_{\text{bed}} = 5.6f$ (contained inside the stone ring $R_{\text{stones}} = 7.0f$).
+- **Height Dynamics**: $H_{\text{bed}}(t) = 0.35 + 0.85 \times (1 - \bar{M}) + V_{\text{flakes}}$, rising from $0.35$ up to $1.4$ as wood is consumed.
+- **Continuous Cellular Fissures**: Continuous harmonic function $F(x, z) = |\sin(1.3x + 0.7z) \cos(1.4z - 0.6x)|$. Where $F < 0.18$ and core temperature is high, incandescent glowing ember veins peek through. Elsewhere, a calcified ash mantle is rendered with stepped diffuse shading.
+
+### 3. Gravity-Dependent Wood Ash Mantle
+In real campfires, ash is a delicate powdery residue that settles on the upward-facing surfaces of burning logs:
+- **Top Crests ($\hat{N}_y > 0.25$)**: Thick chalky white and light ash (`PALETTE_ASH[3..4]`).
+- **Flanks ($-0.1 \le \hat{N}_y \le 0.25$)**: Mid-grey ash (`PALETTE_ASH[1..2]`).
+- **Underside ($\hat{N}_y < -0.1$)**: Ash flakes shed off into the fire below, leaving the black charred charcoal crust (`PALETTE_CHARRED`).
+- **Crevices / Furrows**: Deep grooves retain incandescent glowing embers (`PALETTE_EMBERS`), preserving the structural volume and silhouette of the burning firewood.
+

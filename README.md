@@ -4,10 +4,12 @@ Real-time physical bonfire simulation rendered as 2D pixel art over 3D geometric
 
 Uses a per-object pixel art shader pipeline with object-space snapping to eliminate pixel creep, stepped cel-shading, 1-pixel discontinuity outlines, and Unicode half-block characters (`▀`) for square pixel aspect ratio at 60 FPS with terminal transparency support.
 
-![3D Pixel Art Bonfire with Stone Ring and Combustion Lifecycle](docs/media/stone_ring_c_stages.png)
+![3D Pixel Art Bonfire Combustion and Realistic Ash Stages](docs/media/realistic_ash_stages.png)
 
 ## Key Techniques
 
+- **3D Hearth Ash Bed (`AshBed3D`)**: Analytical 3D dome mound that grows dynamically inside the stone ring as wood burns. Features an internal glowing ember core peeking through continuous cellular fissures and a calcified ash mantle.
+- **Gravity-Settled Wood Ash Mantle**: Eliminates random noise and TV static; ash accumulates realistically on upward-facing log surfaces ($N_y > 0$), while vertical flanks and undersides retain charred carbon crusts with glowing incandescent ember crevices.
 - **3D Stone Fire Ring Containment**: Hearth base ring composed of rounded granite/basalt stones (`Stone3D`) resting at ground level ($Y = -4.2$), receiving dynamic firelight and ash settling.
 - **Segmented Firewood Combustion Lifecycle**: Each log is discretized into $N_{\text{seg}} = 10$ axial segments tracking independent heat conduction, flame ignition, charred alligator cracking, brittle ash degradation, and disintegration.
 - **Zero Floor Fire Spawning**: Flames and heat emit strictly from the central kindling bundle and ignited wood segments ($T > 0.35$). The dirt floor no longer emits fire.
@@ -17,7 +19,6 @@ Uses a per-object pixel art shader pipeline with object-space snapping to elimin
 - **Concentric Tree Rings**: End-caps are rendered with circular growth rings (bark rim, sapwood, heartwood, and pith core).
 - **1-Pixel Outlines**: Screen-space edge detector over the object ID and depth buffers paints dark contour pixels at silhouette boundaries without anti-aliasing blur.
 - **Volumetric Fire Interleaving**: Convective flame grid tested against the log depth buffer, allowing fire to wrap naturally both in front of and behind the wood.
-- **Falling Sand Ash Physics**: Burnt wood peels off as physical ash flakes that fall with gravity, roll over sloped log contours, and pile up at the hearth base.
 - **3D Camera Orbit & Turntable**: Real-time yaw and pitch camera orbit with arbitrary view matrix raycasting, allowing inspection of the 3D log stack and fire volume from any angle.
 - **ANSI Half-Block Output**: Encodes two vertical pixels per character cell (`\033[38;2;...m\033[48;2;...m▀`) with full native terminal background transparency.
 

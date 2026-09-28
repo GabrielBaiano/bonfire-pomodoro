@@ -134,6 +134,16 @@ typedef struct {
     float radius;
 } Stone3D;
 
+#define OBJ_ASH_BED 500
+
+typedef struct {
+    Vec3 center;
+    float radius_xz;
+    float height;
+    float heat;
+    float volume;
+} AshBed3D;
+
 typedef struct {
     Vec3 pos;
     Vec3 vel;
@@ -176,8 +186,8 @@ static float g_fire_heat[MAX_PIXEL_ROWS][MAX_COLS];
 static float g_next_fire[MAX_PIXEL_ROWS][MAX_COLS];
 static float g_fire_z[MAX_PIXEL_ROWS][MAX_COLS];
 
-// Static ash grid for settled sand heap
-static uint8_t g_settled_ash[MAX_PIXEL_ROWS][MAX_COLS];
+// 3D Ash Bed (Leito de cinzas acumulado na base)
+static AshBed3D g_ash_bed;
 
 // 3D Particles
 static Spark g_sparks[MAX_SPARKS];
@@ -378,6 +388,54 @@ static bool intersect_sphere(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, 
     return true;
 }
 
+static bool intersect_ash_bed(const AshBed3D *bed, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+    if (bed->height < 0.08f) return false;
+    float inv_r = 1.0f / bed->radius_xz;
+    float inv_h = 1.0f / bed->height;
+
+    // Ray transformed to unit ellipsoid dome space:
+    // (x/r)^2 + ((y - cy)/h)^2 + (z/r)^2 <= 1, for y >= cy
+    Vec3 p0 = (Vec3){ (ro.x - bed->center.x) * inv_r, (ro.y - bed->center.y) * inv_h, (ro.z - bed->center.z) * inv_r };
+    Vec3 d0 = (Vec3){ rd.x * inv_r, rd.y * inv_h, rd.z * inv_r };
+
+    float a = vec3_dot(d0, d0);
+    float b = vec3_dot(p0, d0);
+    float c = vec3_dot(p0, p0) - 1.0f;
+    float disc = b * b - a * c;
+    if (disc < 0.0f) return false;
+
+    float sdisc = sqrtf(disc);
+    float t1 = (-b - sdisc) / a;
+    float t2 = (-b + sdisc) / a;
+
+    float hit_t = -1.0f;
+    if (t1 > 0.1f) {
+        Vec3 pt1 = vec3_add(ro, vec3_scale(rd, t1));
+        if (pt1.y >= bed->center.y - 0.05f) {
+            hit_t = t1;
+        }
+    }
+    if (hit_t < 0.0f && t2 > 0.1f) {
+        Vec3 pt2 = vec3_add(ro, vec3_scale(rd, t2));
+        if (pt2.y >= bed->center.y - 0.05f) {
+            hit_t = t2;
+        }
+    }
+    if (hit_t < 0.1f) return false;
+
+    Vec3 pt = vec3_add(ro, vec3_scale(rd, hit_t));
+    *out_t = hit_t;
+    *out_pt = pt;
+
+    Vec3 n_raw = (Vec3){
+        (pt.x - bed->center.x) * (inv_r * inv_r),
+        fmaxf(0.08f, pt.y - bed->center.y) * (inv_h * inv_h),
+        (pt.z - bed->center.z) * (inv_r * inv_r)
+    };
+    *out_norm = vec3_norm(n_raw);
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // STACK GENERATORS: Real physical contact points, resting tiers, and gravity
 // -----------------------------------------------------------------------------
@@ -484,9 +542,14 @@ static void build_stack_pyramid(void) {
 static void init_scene(void) {
     memset(g_fire_heat, 0, sizeof(g_fire_heat));
     memset(g_next_fire, 0, sizeof(g_next_fire));
-    memset(g_settled_ash, 0, sizeof(g_settled_ash));
     memset(g_sparks, 0, sizeof(g_sparks));
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
+
+    g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
+    g_ash_bed.radius_xz = 5.6f;
+    g_ash_bed.height = 0.35f;
+    g_ash_bed.heat = 0.35f;
+    g_ash_bed.volume = 0.0f;
 
     g_sim_time = 0.0f;
     g_collapse_progress = 0.0f;
@@ -710,11 +773,17 @@ static void update_simulation(void) {
                 g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.15f);
 
                 // Shed ash flakes as segment crumbles
-                if (g_logs[i].segments[s].burn_progress > 0.65f && rand_f() < 0.06f) {
-                    Vec3 ash_p = seg_p;
-                    ash_p.y += g_logs[i].radius * 0.9f;
-                    Vec3 vel = (Vec3){(rand_f() - 0.5f) * 0.5f + g_wind * 0.4f, -(rand_f() * 0.4f + 0.2f), (rand_f() - 0.5f) * 0.5f};
-                    spawn_ash_3d(ash_p, vel, PALETTE_ASH[rand_range(1, 3)]);
+                if (g_logs[i].segments[s].burn_progress > 0.60f && rand_f() < 0.05f) {
+                    float angle = rand_f() * 6.28318f;
+                    Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
+                                            vec3_scale(g_logs[i].bitangent, sinf(angle)));
+                    Vec3 ash_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
+                    Vec3 vel = (Vec3){
+                        (rand_f() - 0.5f) * 0.3f + g_wind * 0.3f,
+                        -(rand_f() * 0.25f + 0.15f),
+                        (rand_f() - 0.5f) * 0.3f
+                    };
+                    spawn_ash_3d(ash_p, vel, PALETTE_ASH[rand_range(2, 3)]);
                 }
             }
 
@@ -726,16 +795,30 @@ static void update_simulation(void) {
     }
 
     // -------------------------------------------------------------------------
-    // SELF-COLLAPSE PHYSICS: When wood segments lose mass, logs sag and collapse
+    // SELF-COLLAPSE PHYSICS & 3D ASH BED ACCUMULATION
     // -------------------------------------------------------------------------
     float total_mass = 0.0f;
     int total_segs = g_num_logs * NUM_LOG_SEGS;
+    int active_burning_segs = 0;
     for (int i = 0; i < g_num_logs; i++) {
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             total_mass += g_logs[i].segments[s].structural_mass;
+            if (g_logs[i].segments[s].temp > 0.35f) active_burning_segs++;
         }
     }
     float avg_mass = total_mass / (float)total_segs;
+    float burnt_mass = 1.0f - avg_mass;
+
+    // Ash bed height builds up organically as wood is consumed
+    g_ash_bed.height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
+
+    // Ash bed heat tracks active fire and stays hot as an ember bed
+    if (active_burning_segs > 0) {
+        g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.003f * g_time_scale);
+    } else if (g_sim_time > 25.0f) {
+        g_ash_bed.heat = fmaxf(0.12f, g_ash_bed.heat - 0.0003f * g_time_scale);
+    }
+
     float collapse_factor = fmaxf(0.0f, 1.0f - avg_mass);
     if (g_force_collapse) collapse_factor = 1.0f;
 
@@ -892,19 +975,22 @@ static void update_simulation(void) {
         }
     }
 
-    // 5. Ash Flakes drift & accumulation on ground
+    // 5. 3D Ash Flakes drift & accumulation into 3D Ash Bed
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
-            g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.05f + sinf(g_ash_flakes[i].pos.y * 2.0f + g_sim_time) * 0.02f;
-            g_ash_flakes[i].pos.y += g_ash_flakes[i].vel.y * 0.05f;
-            g_ash_flakes[i].pos.z += g_ash_flakes[i].vel.z * 0.05f;
+            g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.04f + sinf(g_ash_flakes[i].pos.y * 1.5f + g_sim_time) * 0.015f;
+            g_ash_flakes[i].pos.y += g_ash_flakes[i].vel.y * 0.04f;
+            g_ash_flakes[i].pos.z += g_ash_flakes[i].vel.z * 0.04f;
 
-            if (g_ash_flakes[i].pos.y <= -4.15f) {
-                Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
-                int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
-                int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
-                if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
-                    g_settled_ash[sy][sx] = 1;
+            float r_sq = g_ash_flakes[i].pos.x * g_ash_flakes[i].pos.x + g_ash_flakes[i].pos.z * g_ash_flakes[i].pos.z;
+            float r_bed = g_ash_bed.radius_xz;
+            float bed_h = (r_sq < r_bed * r_bed) ? (g_ash_bed.height * sqrtf(1.0f - r_sq / (r_bed * r_bed))) : 0.0f;
+            float floor_y = -4.2f + bed_h;
+
+            if (g_ash_flakes[i].pos.y <= floor_y) {
+                if (r_sq < r_bed * r_bed) {
+                    g_ash_bed.volume += 0.002f;
+                    g_ash_bed.height = fminf(1.4f, 0.35f + g_ash_bed.volume);
                 }
                 g_ash_flakes[i].active = false;
             }
@@ -1004,6 +1090,19 @@ static void render_scene(void) {
                 }
             }
 
+            // Test 3D Ash Bed (Leito de cinzas central)
+            Vec3 ash_bed_pt = {0,0,0}, ash_bed_norm = {0,1,0};
+            float ab_t;
+            Vec3 ab_p, ab_n;
+            if (intersect_ash_bed(&g_ash_bed, ray_orig, ray_dir, &ab_t, &ab_p, &ab_n)) {
+                if (ab_t < closest_t) {
+                    closest_t = ab_t;
+                    ash_bed_pt = ab_p;
+                    ash_bed_norm = ab_n;
+                    hit_type = 3;
+                }
+            }
+
             if (hit_type == 1 && hit_stone != NULL) {
                 g_id_buf[y][x] = hit_stone->obj_id;
                 g_depth_buf[y][x] = vec3_dot(vec3_sub(stone_pt, cam_pos), fwd);
@@ -1050,53 +1149,128 @@ static void render_scene(void) {
                     float u_plate = floorf(hit_u * num_plates_u);
                     float v_plate = floorf(hit_v * num_plates_v);
 
-                    float plate_hash = sinf(u_plate * 12.9898f + v_plate * 78.233f) * 43758.5453f;
-                    float plate_var = (plate_hash - floorf(plate_hash)) * 0.25f - 0.12f;
-
                     float u_frac = (hit_u * num_plates_u) - u_plate;
                     float v_frac = (hit_v * num_plates_v) - v_plate;
                     bool is_furrow = (u_frac < 0.12f || u_frac > 0.88f || (v_frac < 0.08f && ((int)u_plate % 2 == 0)));
 
-                    if (burn > 0.75f) {
-                        // 4. Brittle Ash Grey / Powder
-                        int ash_idx = (int)((light_val + plate_var) * 2.4f);
-                        if (ash_idx < 0) ash_idx = 0;
-                        if (ash_idx > 4) ash_idx = 4;
-                        g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                    if (burn > 0.70f) {
+                        // STAGE: Calcified Ash & Embers
+                        if (is_furrow) {
+                            if (seg_temp > 0.30f) {
+                                int emb_idx = (int)(seg_temp * 3.5f);
+                                if (emb_idx < 0) emb_idx = 0;
+                                if (emb_idx > 3) emb_idx = 3;
+                                g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                            } else {
+                                g_shade_buf[y][x] = PALETTE_CHARRED[0];
+                            }
+                        } else {
+                            // Upward facing normal holds ash mantle; underside sheds it
+                            float up_factor = log_norm.y;
+                            if (up_factor > 0.25f) {
+                                // Top crest: thick chalky white and light ash
+                                int ash_idx = (int)(light_val * 2.0f + 1.8f);
+                                if (ash_idx < 2) ash_idx = 2;
+                                if (ash_idx > 4) ash_idx = 4;
+                                g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                            } else if (up_factor > -0.1f) {
+                                // Sloped flanks: mid-grey ash
+                                int ash_idx = (int)(light_val * 1.8f + 0.9f);
+                                if (ash_idx < 1) ash_idx = 1;
+                                if (ash_idx > 3) ash_idx = 3;
+                                g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                            } else {
+                                // Underside: charred carbon crust
+                                int c_idx = (int)(light_val * 1.8f);
+                                if (c_idx < 0) c_idx = 0;
+                                if (c_idx > 2) c_idx = 2;
+                                g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
+                            }
+                        }
                     } else if (burn > 0.40f) {
-                        // 3. Charred Black Bark with Glowing Embers in deep crevices
-                        if (is_furrow && seg_temp > 0.50f) {
+                        // STAGE: Active Combustion & Alligator Charring
+                        if (is_furrow && seg_temp > 0.40f) {
                             int emb_idx = (int)(seg_temp * 3.5f);
                             if (emb_idx < 0) emb_idx = 0;
                             if (emb_idx > 3) emb_idx = 3;
                             g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                         } else {
-                            int c_idx = (int)((light_val + plate_var) * 2.0f);
-                            if (c_idx < 0) c_idx = 0;
-                            if (c_idx > 4) c_idx = 4;
-                            g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
+                            if (burn > 0.55f && log_norm.y > 0.45f) {
+                                // Early ash dusting on top of charred plates
+                                g_shade_buf[y][x] = PALETTE_ASH[1];
+                            } else {
+                                int c_idx = (int)(light_val * 2.0f);
+                                if (c_idx < 0) c_idx = 0;
+                                if (c_idx > 4) c_idx = 4;
+                                g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
+                            }
                         }
                     } else if (burn > 0.15f) {
-                        // 2. Smoking / soot heated bark
+                        // STAGE: Scorched / Soot Bark
                         if (is_furrow) {
                             g_shade_buf[y][x] = PALETTE_CHARRED[0];
                         } else {
-                            int b_idx = (int)((light_val + plate_var) * 2.0f);
+                            int b_idx = (int)(light_val * 2.0f);
                             if (b_idx < 1) b_idx = 1;
                             if (b_idx > 4) b_idx = 4;
                             g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
                         }
                     } else {
-                        // 1. Fresh Natural Oak Wood
+                        // STAGE: Fresh Natural Oak Wood
                         if (is_furrow) {
                             g_shade_buf[y][x] = PALETTE_WOOD[0];
                         } else {
-                            int b_idx = (int)((light_val + plate_var) * 2.8f);
+                            int b_idx = (int)(light_val * 2.8f);
                             if (b_idx < 1) b_idx = 1;
                             if (b_idx > 6) b_idx = 6;
                             g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
                         }
                     }
+                }
+
+            } else if (hit_type == 3) {
+                g_id_buf[y][x] = OBJ_ASH_BED;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(ash_bed_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, ash_bed_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, vec3_dot(ash_bed_norm, l_dir));
+                float ambient = 0.24f + 0.12f * fmaxf(0.0f, ash_bed_norm.y);
+                float s_val = ndotl * atten * light_intensity * 2.2f + ambient;
+
+                float r_core = sqrtf(ash_bed_pt.x * ash_bed_pt.x + ash_bed_pt.z * ash_bed_pt.z);
+                float core_heat = g_ash_bed.heat * fmaxf(0.0f, 1.0f - r_core / 4.8f);
+
+                // Continuous cellular fissure pattern
+                float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
+                float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
+                float fissure = fabsf(f1 * f2);
+
+                if (fissure < 0.18f && core_heat > 0.22f) {
+                    // Deep incandescent ember vein peeking through the ash bed
+                    int emb_idx = (int)(core_heat * 3.8f);
+                    if (emb_idx < 0) emb_idx = 0;
+                    if (emb_idx > 3) emb_idx = 3;
+                    g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                } else {
+                    // Cohesive calcified ash mantle
+                    int ash_idx;
+                    if (r_core < 1.8f && core_heat > 0.35f) {
+                        ash_idx = (int)(s_val * 1.6f);
+                        if (ash_idx < 1) ash_idx = 1;
+                        if (ash_idx > 2) ash_idx = 2;
+                    } else if (r_core < 3.8f) {
+                        ash_idx = (int)(s_val * 2.2f);
+                        if (ash_idx < 2) ash_idx = 2;
+                        if (ash_idx > 3) ash_idx = 3;
+                    } else {
+                        ash_idx = (int)(s_val * 2.6f);
+                        if (ash_idx < 2) ash_idx = 2;
+                        if (ash_idx > 4) ash_idx = 4;
+                    }
+                    g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
                 }
             }
         }
@@ -1128,7 +1302,11 @@ static void render_scene(void) {
             }
 
             if (is_edge) {
-                g_frame[y][x].color = PALETTE_WOOD[0]; // Dark outline
+                if (curr_id == OBJ_ASH_BED) {
+                    g_frame[y][x].color = PALETTE_ASH[0];
+                } else {
+                    g_frame[y][x].color = PALETTE_WOOD[0]; // Dark outline
+                }
                 g_frame[y][x].is_sky = false;
             } else {
                 g_frame[y][x].color = g_shade_buf[y][x];
@@ -1165,17 +1343,7 @@ static void render_scene(void) {
         }
     }
 
-    // 4. Settled Ash Heap
-    for (int y = 0; y < g_pixel_h; y++) {
-        for (int x = 0; x < g_pixel_w; x++) {
-            if (g_settled_ash[y][x]) {
-                g_frame[y][x].color = PALETTE_ASH[((x + y) % 2 == 0) ? 2 : 3];
-                g_frame[y][x].is_sky = false;
-            }
-        }
-    }
-
-    // 5. Ash Flakes Falling
+    // 4. Ash Flakes Falling in 3D
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
             Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
