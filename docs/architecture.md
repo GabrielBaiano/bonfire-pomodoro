@@ -131,7 +131,40 @@ To allow free 3D camera rotation around the hearth without pixel creep:
 
 ---
 
-## 7. Experiment Discoveries & Fixes Log
+## 7. Physical Wood Stacking Geometries & Bark Plate Shading
+
+### 1. The Three Stacking Archetypes
+1. **Fogueira Quadrada / Cabana de Troncos (`Log Cabin` / `Cribbing`)**:
+   - Built with alternating orthogonal tiers forming a hollow chimney core.
+   - **Tier 1 (Base on Ground)**: 2 parallel logs aligned on the X-axis ($Y = Y_{\text{ground}} + R_1$).
+   - **Tier 2 (Perpendicular Mid)**: 2 logs resting across Tier 1 along the Z-axis at notched contact height:
+     $$Y_2 = Y_1 + R_1 + R_2 - \delta_{\text{notch}}$$
+   - **Tier 3 (Diagonal Top Braces)**: 2 bracing logs resting across Tier 2.
+   - Gravity collapse: As base logs burn through, upper tiers drop down to ground level under gravity.
+
+2. **Tenda Cônica (`Teepee` / `Cone`)**:
+   - 5 radial logs arranged in a circle on the ground ($Y = Y_{\text{ground}} + R$), leaning inward to a central apex lock:
+     $$\vec{P}_{1, i} = (R_{\text{base}} \cos\theta_i, \; Y_{\text{ground}} + R, \; R_{\text{base}} \sin\theta_i)$$
+     $$\vec{P}_{2, i} = (R_{\text{apex}} \cos\theta_i, \; Y_{\text{apex}}, \; R_{\text{apex}} \sin\theta_i)$$
+   - Gravity collapse: When apex support degrades, tips roll inward and collapse flat onto the hearth.
+
+3. **Pirâmide com Escora (`Pyramid / Lean-to`)**:
+   - 2 heavy foundation logs on the ground supporting 3 angled cross logs over the kindle cradle.
+
+### 2. Discrete Bark Plate Shading (Zero Periodic Stripes)
+Sinusoidal oscillations (`sin(k * u)`) create zebra/tiger striping artifacts across cylindrical meshes. The engine replaces this with discrete 2D cellular bark plates:
+$$u_{\text{plate}} = \lfloor u \times 14 \rfloor, \quad v_{\text{plate}} = \lfloor v \times (L \times 2.2) \rfloor$$
+
+- Plate borders ($u_{\text{frac}} < 0.12$ or $u_{\text{frac}} > 0.88$) define deep bark furrows painted with shadow `#140C08`.
+- Raised bark plates receive natural oak tones (`#2A1B12` to `#A87A55`).
+- Concentric growth rings on cut ends use quantized radius fractions: $\lfloor r_{\text{frac}} \times 8 \rfloor \pmod 2$.
+- Incandescent embers and charcoal charring appear **exclusively** on surfaces directly exposed to combustion heat ($d_{\text{core}} < 4.8$ and $E_{\text{heat}} > 0.45$).
+
+![3D Bonfire Stacking Modes](media/stacks_c_engine.png)
+
+---
+
+## 8. Experiment Discoveries & Fixes Log
 
 | Issue | Root Cause | Solution |
 | --- | --- | --- |
@@ -143,3 +176,5 @@ To allow free 3D camera rotation around the hearth without pixel creep:
 | Floating logs without gravity | Cylinder coordinates lacked a ground plane and had floating pivots | Defined ground plane at $Y = -4.2f$, grounded all base pivots, and implemented rotational gravity collapse around base pivots. |
 | Logs remaining dark in shadow of roaring fire | Light placed behind logs with rigid Lambertian cutoff ($N \cdot L \le 0$) | Placed flickering light source forward at $Z = -1.2f$ and applied Half-Lambert wrap lighting $\frac{N \cdot L + 0.45}{1.45}$, bathing curved log faces in warm amber and golden bands. |
 | Fixed camera angle preventing 3D scene inspection | Orthographic rays were locked to fixed $+Z$ vector | Implemented 3D spherical orbit camera with yaw/pitch rotation, real-time keyboard controls (`←/→/↑/↓`, `WASD`), and auto-turntable mode. |
+| Unrealistic orange/red tiger stripes on wood | Trigonometric functions `sin(38*u)` and `sin(18*u + 8*v)` triggered ember palette and bright orange color bands | Replaced with discrete object-space cellular bark plates, natural oak/pine palette, and confined glowing embers strictly to fire-exposed charred crevices. |
+| Chaotic and arbitrary log stack | 4 hardcoded logs hovered and leaned unnaturally | Researched and implemented 3 classic bonfire stacking geometries (Log Cabin, Teepee, and Pyramid) with physical contact notches and gravity collapse. |

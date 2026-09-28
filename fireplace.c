@@ -1,17 +1,32 @@
-#define _GNU_SOURCE
+/*
+ * 3D Per-Object Pixel Art Bonfire Simulation (C Edition)
+ *
+ * Techniques:
+ * - 3D Spherical Orbit Camera (Yaw θ, Pitch φ) with free real-time rotation
+ * - 3 Physical Wood Stacking Modes (Log Cabin, Teepee, Pyramid) with contact physics
+ * - Discrete Object-Space Bark Plates (Zero Pixel Creep, NO orange tiger stripes)
+ * - Concentric Growth Rings on Cut End-Caps
+ * - Localized Charring & Crevice Embers (only on burning surfaces)
+ * - 1-Pixel Cel-Art Outlines via G-Buffer Discontinuity
+ * - Dynamic Half-Lambert Point-Light Wrap Illumination
+ * - 3D Convective Fire Interleaving with Depth Buffer
+ * - Falling Sand Ash Flakes & Rising 3D Sparks
+ * - ANSI 24-bit TrueColor Half-Block Character Output ('▀', '▄')
+ */
+
 #define _POSIX_C_SOURCE 200809L
+#define _USE_MATH_DEFINES
 #include <stdio.h>
 #include <stdlib.h>
-#include <stdint.h>
-#include <stdbool.h>
 #include <string.h>
-#include <unistd.h>
-#include <time.h>
+#include <stdbool.h>
+#include <stdint.h>
 #include <math.h>
-#include <signal.h>
+#include <time.h>
+#include <unistd.h>
 #include <termios.h>
 #include <sys/ioctl.h>
-#include <sys/select.h>
+#include <signal.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -21,6 +36,7 @@
 #define MAX_PIXEL_ROWS 180
 #define MAX_SPARKS 256
 #define MAX_ASH_FLAKES 128
+#define MAX_LOGS 16
 
 typedef struct {
     uint8_t r, g, b;
@@ -28,24 +44,33 @@ typedef struct {
 
 static const RGB COLOR_BLACK = {0, 0, 0};
 
-// Curated 3D Pixel Art Wood Palette (Rich oak, bark, heartwood, cel-highlights)
+// Curated Natural Oak & Pine Bark Palette (No artificial orange stripes!)
 static const RGB PALETTE_WOOD[] = {
-    {24, 12, 6},      // 0: Dark Outline / Deep crevice
-    {56, 26, 14},     // 1: Deep shadow bark
-    {96, 46, 24},     // 2: Dark oak bark
-    {145, 72, 36},    // 3: Mid grain / warm bark
-    {195, 104, 50},   // 4: Heartwood
-    {238, 142, 68},   // 5: Firelit timber
-    {255, 185, 95}    // 6: Bright golden rim highlight
+    {20, 12, 8},      // 0: Dark Outline / Deep crevice
+    {42, 27, 18},     // 1: Deep shadow bark (raw umber)
+    {72, 48, 32},     // 2: Dark weathered oak
+    {105, 72, 48},    // 3: Mid oak bark
+    {138, 96, 64},    // 4: Warm dry timber fiber
+    {168, 120, 82},   // 5: Muted wood highlight
+    {200, 145, 102}   // 6: Warm firelit rim (natural, NOT neon orange!)
+};
+
+// Charcoal and Carbonized Bark
+static const RGB PALETTE_CHARRED[] = {
+    {16, 12, 12},     // 0: Deep black crevice
+    {30, 26, 26},     // 1: Charred black bark
+    {52, 48, 48},     // 2: Dark charcoal
+    {80, 72, 68},     // 3: Burnt ash bark
+    {115, 110, 108}   // 4: Light ash surface
 };
 
 // End-cap cut face with concentric tree rings
 static const RGB PALETTE_ENDCAP[] = {
-    {24, 12, 6},      // 0: Outline
-    {115, 58, 30},    // 1: Dark ring
-    {168, 92, 48},    // 2: Mid ring
-    {218, 134, 74},   // 3: Light ring
-    {255, 180, 110}   // 4: Firelit cut face
+    {20, 12, 8},      // 0: Outer bark rim
+    {92, 60, 38},     // 1: Dark ring
+    {130, 88, 56},    // 2: Mid ring
+    {168, 116, 78},   // 3: Sapwood ring
+    {205, 150, 105}   // 4: Pith core
 };
 
 // Embers & Flames (Deep red -> Hot orange -> Bright yellow -> White hot core)
@@ -72,10 +97,11 @@ typedef struct {
 
 typedef struct {
     int obj_id;
-    Vec3 p1, p2;           // Current geometry
-    Vec3 p1_orig, p2_orig; // Initial stack geometry
-    Vec3 p2_collapsed;     // Rotational gravity target
+    Vec3 p1, p2;                       // Current geometry
+    Vec3 p1_orig, p2_orig;             // Initial stack geometry
+    Vec3 p1_collapsed, p2_collapsed;   // Physical collapse target under gravity
     float radius;
+    float charred;                     // Susceptibility to burning/charring
     float wood_health;
     float ash_amount;
     Vec3 axis, dir, tangent, bitangent;
@@ -131,12 +157,14 @@ static uint8_t g_settled_ash[MAX_PIXEL_ROWS][MAX_COLS];
 static Spark g_sparks[MAX_SPARKS];
 static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 
-// 3D Logs
-static Cylinder3D g_logs[4];
+// 3D Logs & Stacking Modes
+static Cylinder3D g_logs[MAX_LOGS];
+static int g_num_logs = 6;
+static int g_stack_mode = 0; // 0: Log Cabin (Fogueira Quadrada), 1: Teepee (Tenda Cônica), 2: Pyramid (Lean-to)
 
 // 3D Camera State
-static float g_cam_yaw = 0.0f;       // Horizontal orbit angle (radians)
-static float g_cam_pitch = 0.32f;    // Elevation angle (radians, ~18 deg)
+static float g_cam_yaw = 0.40f;       // Horizontal orbit angle (radians, ~23 deg)
+static float g_cam_pitch = 0.35f;    // Elevation angle (radians, ~20 deg)
 static bool g_auto_turntable = false; // Auto 360 degree turntable rotation
 
 // Simulation dynamics
@@ -144,9 +172,9 @@ static float g_sim_time = 0.0f;
 static float g_time_scale = 1.0f;
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
-static bool g_paused = false;
 static float g_collapse_progress = 0.0f;
 static bool g_force_collapse = false;
+static bool g_paused = false;
 
 // PRNG
 static uint32_t g_rng = 0x8542b821;
@@ -206,14 +234,16 @@ static void recompute_cylinder_axes(Cylinder3D *c) {
     c->bitangent = vec3_cross(c->dir, c->tangent);
 }
 
-static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p2_collapsed, float radius) {
+static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_collapsed, Vec3 p2_collapsed, float radius, float charred) {
     c->obj_id = id;
     c->p1 = p1;
     c->p2 = p2;
     c->p1_orig = p1;
     c->p2_orig = p2;
+    c->p1_collapsed = p1_collapsed;
     c->p2_collapsed = p2_collapsed;
     c->radius = radius;
+    c->charred = charred;
     c->wood_health = 100.0f;
     c->ash_amount = 0.0f;
     recompute_cylinder_axes(c);
@@ -254,7 +284,7 @@ static void setup_terminal(void) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGWINCH, &sa, NULL);
 
-    safe_write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[2J", 16);
+    safe_write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[2J", 15);
 }
 
 static void update_dimensions(void) {
@@ -269,11 +299,114 @@ static void update_dimensions(void) {
 
     g_pixel_w = g_term_cols;
     if (g_pixel_w > MAX_COLS) g_pixel_w = MAX_COLS;
-    if (g_pixel_w < 30) g_pixel_w = 30;
+    if (g_pixel_w < 40) g_pixel_w = 40;
 
     g_pixel_h = (g_term_rows - 2) * 2;
     if (g_pixel_h > MAX_PIXEL_ROWS) g_pixel_h = MAX_PIXEL_ROWS;
     if (g_pixel_h < 30) g_pixel_h = 30;
+}
+
+// -----------------------------------------------------------------------------
+// STACK GENERATORS: Real physical contact points, resting tiers, and gravity
+// -----------------------------------------------------------------------------
+
+// 1. FOGUEIRA QUADRADA / CABANA DE TRONCOS (Log Cabin / Cribbing)
+static void build_stack_log_cabin(void) {
+    g_num_logs = 6;
+    float ground_y = -4.2f;
+    float r1 = 1.25f;
+    float r2 = 1.15f;
+    float r3 = 0.95f;
+    float span = 3.6f;
+
+    // Tier 1 (Ground along X): 2 logs resting flat on ground
+    float y1 = ground_y + r1;
+    init_cylinder(&g_logs[0], 1,
+                  (Vec3){-5.0f, y1, -span}, (Vec3){5.0f, y1, -span},
+                  (Vec3){-5.0f, y1, -span}, (Vec3){5.0f, y1, -span},
+                  r1, 0.25f);
+    init_cylinder(&g_logs[1], 2,
+                  (Vec3){-5.0f, y1,  span}, (Vec3){5.0f, y1,  span},
+                  (Vec3){-5.0f, y1,  span}, (Vec3){5.0f, y1,  span},
+                  r1, 0.25f);
+
+    // Tier 2 (Resting across Tier 1 along Z): 2 logs
+    float y2 = y1 + r1 + r2 - 0.25f; // Notch contact
+    float y2_coll = ground_y + r2;   // When base burns out, drops to ground
+    init_cylinder(&g_logs[2], 3,
+                  (Vec3){-span, y2, -5.0f}, (Vec3){-span, y2, 5.0f},
+                  (Vec3){-span, y2_coll, -4.6f}, (Vec3){-span, y2_coll, 4.6f},
+                  r2, 0.40f);
+    init_cylinder(&g_logs[3], 4,
+                  (Vec3){ span, y2, -5.0f}, (Vec3){ span, y2, 5.0f},
+                  (Vec3){ span, y2_coll, -4.6f}, (Vec3){ span, y2_coll, 4.6f},
+                  r2, 0.40f);
+
+    // Tier 3 (Cross diagonally across top): 2 logs
+    float y3 = y2 + r2 + r3 - 0.20f;
+    float y3_coll = ground_y + r3 + 0.3f;
+    init_cylinder(&g_logs[4], 5,
+                  (Vec3){-4.0f, y3, -3.0f}, (Vec3){4.0f, y3, 3.0f},
+                  (Vec3){-2.5f, y3_coll, -1.8f}, (Vec3){2.5f, y3_coll, 1.8f},
+                  r3, 0.60f);
+    init_cylinder(&g_logs[5], 6,
+                  (Vec3){-4.0f, y3,  3.0f}, (Vec3){4.0f, y3, -3.0f},
+                  (Vec3){-2.5f, y3_coll,  1.8f}, (Vec3){2.5f, y3_coll, -1.8f},
+                  r3, 0.60f);
+}
+
+// 2. TENDA CÔNICA (Teepee / Cone)
+static void build_stack_teepee(void) {
+    g_num_logs = 5;
+    float ground_y = -4.2f;
+    float base_r = 4.2f;
+    float apex_r = 0.6f;
+    float apex_y = 2.4f;
+    float r = 1.15f;
+
+    for (int i = 0; i < 5; i++) {
+        float angle = (i * 2.0f * (float)M_PI / 5.0f) + 0.3f;
+        Vec3 p1 = {base_r * cosf(angle), ground_y + r, base_r * sinf(angle)};
+        Vec3 p2 = {apex_r * cosf(angle), apex_y, apex_r * sinf(angle)};
+        // Collapses inward toward ground
+        Vec3 p2_coll = {apex_r * 0.4f * cosf(angle), ground_y + r + 0.4f, apex_r * 0.4f * sinf(angle)};
+        init_cylinder(&g_logs[i], i + 1, p1, p2, p1, p2_coll, r, 0.45f);
+    }
+}
+
+// 3. PIRÂMIDE COM ESCORA (Pyramid / Lean-to)
+static void build_stack_pyramid(void) {
+    g_num_logs = 5;
+    float ground_y = -4.2f;
+    float r_base = 1.35f;
+    float r_cross = 1.10f;
+    float y1 = ground_y + r_base;
+
+    // 2 Base logs
+    init_cylinder(&g_logs[0], 1,
+                  (Vec3){-5.5f, y1, -2.5f}, (Vec3){5.5f, y1, -2.5f},
+                  (Vec3){-5.5f, y1, -2.5f}, (Vec3){5.5f, y1, -2.5f},
+                  r_base, 0.25f);
+    init_cylinder(&g_logs[1], 2,
+                  (Vec3){-5.5f, y1,  2.5f}, (Vec3){5.5f, y1,  2.5f},
+                  (Vec3){-5.5f, y1,  2.5f}, (Vec3){5.5f, y1,  2.5f},
+                  r_base, 0.25f);
+
+    // 3 Leaning logs
+    float y_apex = 2.2f;
+    float y_coll = ground_y + r_cross + 0.2f;
+    init_cylinder(&g_logs[2], 3,
+                  (Vec3){-4.2f, y1 + r_base - 0.2f, -1.0f}, (Vec3){0.0f, y_apex, -0.2f},
+                  (Vec3){-4.0f, y_coll, -0.6f}, (Vec3){0.0f, y_coll, -0.1f},
+                  r_cross, 0.50f);
+    init_cylinder(&g_logs[3], 4,
+                  (Vec3){ 4.2f, y1 + r_base - 0.2f, -1.0f}, (Vec3){0.0f, y_apex, -0.2f},
+                  (Vec3){ 4.0f, y_coll, -0.6f}, (Vec3){0.0f, y_coll, -0.1f},
+                  r_cross, 0.50f);
+    init_cylinder(&g_logs[4], 5,
+                  (Vec3){ 0.0f, y1 + r_base - 0.2f,  3.0f}, (Vec3){0.0f, y_apex,  0.4f},
+                  (Vec3){ 0.0f, y_coll,  2.4f}, (Vec3){0.0f, y_coll,  0.2f},
+                  r_cross, 0.50f);
 }
 
 static void init_scene(void) {
@@ -287,35 +420,13 @@ static void init_scene(void) {
     g_collapse_progress = 0.0f;
     g_force_collapse = false;
 
-    float ground_y = -4.2f;
-
-    // Log 1: Main Diagonal Left Log (Base on ground at left, leaning up-right)
-    init_cylinder(&g_logs[0], 1,
-                  (Vec3){-5.2f, ground_y, 0.5f},
-                  (Vec3){0.8f, 0.8f, -0.3f},
-                  (Vec3){0.2f, ground_y + 0.8f, -0.2f},
-                  1.35f);
-
-    // Log 2: Leaning Right Log (Base on ground at right, crossing over Log 1)
-    init_cylinder(&g_logs[1], 2,
-                  (Vec3){5.6f, ground_y, 0.3f},
-                  (Vec3){-0.5f, 1.6f, 0.2f},
-                  (Vec3){-0.2f, ground_y + 0.9f, 0.2f},
-                  1.30f);
-
-    // Log 3: Left Lower Ground Branch (Resting flat on ground extending left)
-    init_cylinder(&g_logs[2], 3,
-                  (Vec3){-8.8f, ground_y, 1.1f},
-                  (Vec3){-4.0f, ground_y + 0.4f, 0.6f},
-                  (Vec3){-4.0f, ground_y + 0.4f, 0.6f},
-                  1.05f);
-
-    // Log 4: Rear Vertical Timber (Resting on ground behind left fire spire)
-    init_cylinder(&g_logs[3], 4,
-                  (Vec3){-2.8f, ground_y, 2.0f},
-                  (Vec3){-2.2f, 4.4f, 1.5f},
-                  (Vec3){-2.0f, ground_y + 1.4f, 1.2f},
-                  0.95f);
+    if (g_stack_mode == 0) {
+        build_stack_log_cabin();
+    } else if (g_stack_mode == 1) {
+        build_stack_teepee();
+    } else {
+        build_stack_pyramid();
+    }
 
     int cx = g_pixel_w / 2;
     int cradle_y = (int)(g_pixel_h * 0.72f);
@@ -436,16 +547,12 @@ static void spawn_spark_3d(Vec3 pos, Vec3 vel, int life, RGB color) {
     }
 }
 
-static void spawn_ash_flake_3d(Vec3 pos) {
+static void spawn_ash_3d(Vec3 pos, Vec3 vel, RGB color) {
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (!g_ash_flakes[i].active) {
             g_ash_flakes[i].pos = pos;
-            g_ash_flakes[i].vel = (Vec3){
-                (rand_f() - 0.5f) * 0.08f,
-                -0.08f - rand_f() * 0.06f,
-                (rand_f() - 0.5f) * 0.08f
-            };
-            g_ash_flakes[i].color = PALETTE_ASH[rand_range(1, 3)];
+            g_ash_flakes[i].vel = vel;
+            g_ash_flakes[i].color = color;
             g_ash_flakes[i].active = true;
             break;
         }
@@ -457,35 +564,35 @@ static void update_simulation(void) {
 
     g_sim_time += 0.045f * g_time_scale;
 
-    // Turntable camera rotation
-    if (g_auto_turntable) {
-        g_cam_yaw += 0.02f * g_time_scale;
-        if (g_cam_yaw > 2.0f * (float)M_PI) g_cam_yaw -= 2.0f * (float)M_PI;
-    }
-
-    // Wind dynamics
+    // Ambient Wind oscillation
     if (rand_f() < 0.05f) {
         g_wind_target = (rand_f() - 0.5f) * 1.8f;
     }
     g_wind += (g_wind_target - g_wind) * 0.04f;
 
-    // Combustion intensity across 7 stages
-    float intensity = 0.0f;
+    // Auto-turntable continuous orbit
+    if (g_auto_turntable) {
+        g_cam_yaw += 0.015f * g_time_scale;
+        if (g_cam_yaw > 2.0f * (float)M_PI) g_cam_yaw -= 2.0f * (float)M_PI;
+    }
+
+    // 7-Stage Combustion Intensity Curve
+    float intensity = 1.0f;
     if (g_sim_time < 12.0f) {
         intensity = 0.20f + (g_sim_time / 12.0f) * 0.35f;
     } else if (g_sim_time < 35.0f) {
         intensity = 0.55f + ((g_sim_time - 12.0f) / 23.0f) * 0.45f;
     } else if (g_sim_time < 85.0f) {
-        intensity = 1.0f; // Roaring peak
+        intensity = 1.0f; // Peak Roaring Fire
     } else if (g_sim_time < 125.0f) {
         intensity = 0.88f; // Ashening
     } else if (g_sim_time < 155.0f) {
-        intensity = 0.65f; // Collapsing
+        intensity = 0.65f; // Structural Collapse
     } else if (g_sim_time < 200.0f) {
-        intensity = 0.35f; // Glowing embers
+        intensity = 0.35f; // Ember Bed
     } else {
         float fade = (g_sim_time - 200.0f) / 45.0f;
-        intensity = fmaxf(0.0f, 0.22f - fade * 0.22f);
+        intensity = fmaxf(0.0f, 0.22f - fade * 0.22f); // Cold Ash Mound
     }
 
     // Physical Rotational Gravity Collapse around grounded base pivots!
@@ -494,7 +601,11 @@ static void update_simulation(void) {
         if (g_collapse_progress > 1.0f) g_collapse_progress = 1.0f;
 
         float c = g_collapse_progress;
-        for (int i = 0; i < 4; i++) {
+        for (int i = 0; i < g_num_logs; i++) {
+            g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
+            g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
+            g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+
             g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
             g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
             g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
@@ -519,7 +630,6 @@ static void update_simulation(void) {
     float world_h = 14.0f;
 
     // Projected screen positions for 3D fire emitters
-    // 3D Anchor positions for the twin spires in world space:
     Vec3 left_spire_w = (Vec3){-1.2f, -1.6f, 0.4f};
     Vec3 right_spire_w = (Vec3){1.0f, -1.6f, -0.2f};
     Vec3 core_w = (Vec3){0.0f, -1.8f, 0.0f};
@@ -540,14 +650,14 @@ static void update_simulation(void) {
     // FIRE INJECTION: Emanates from the BURNING WOOD & CRADLE
     // =========================================================================
     // 1. Heat emitted from contact surfaces of the burning logs
-    for (int i = 0; i < 4; i++) {
+    for (int i = 0; i < g_num_logs; i++) {
         if (intensity < 0.15f) continue;
         int num_pts = (int)(g_logs[i].length * 6.0f);
         for (int s = 0; s < num_pts; s++) {
             float t = (float)s / num_pts;
             Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
 
-            float dist_to_c = sqrtf(p.x * p.x + (p.y + 2.0f) * (p.y + 2.0f) + p.z * p.z);
+            float dist_to_c = sqrtf(p.x * p.x + (p.y + 1.8f) * (p.y + 1.8f) + p.z * p.z);
             if (dist_to_c < 4.5f) {
                 Vec3 p_rel = vec3_sub(p, cam_pos);
                 int gx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
@@ -577,7 +687,7 @@ static void update_simulation(void) {
         }
     }
 
-    // 3. Convective flame propagation: ROARING TWIN SPIRES
+    // 3. Convective flame propagation: ROARING SPIRES
     for (int y = cradle_y; y >= 2; y--) {
         float hr = (float)(cradle_y - y) / cradle_y;
         for (int x = 0; x < g_pixel_w; x++) {
@@ -618,14 +728,14 @@ static void update_simulation(void) {
         }
     }
 
-    for (int y = 2; y <= cradle_y; y++) {
+    for (int y = 0; y < g_pixel_h; y++) {
         for (int x = 0; x < g_pixel_w; x++) {
             g_fire_heat[y][x] = g_next_fire[y][x];
         }
     }
 
-    // Wood burning & 3D flake detachment
-    for (int i = 0; i < 4; i++) {
+    // 4. Wood Degradation & Ash Formation
+    for (int i = 0; i < g_num_logs; i++) {
         if (intensity > 0.35f && g_logs[i].wood_health > 0.0f) {
             g_logs[i].wood_health -= 0.025f * g_time_scale;
             g_logs[i].ash_amount += 0.030f * g_time_scale;
@@ -633,60 +743,67 @@ static void update_simulation(void) {
             if (rand_f() < 0.12f && g_logs[i].ash_amount > 20.0f) {
                 float t = rand_f();
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t));
-                spawn_ash_flake_3d(p);
+                p.y += g_logs[i].radius * 0.9f;
+                Vec3 vel = (Vec3){(rand_f() - 0.5f) * 0.6f + g_wind * 0.4f, -(rand_f() * 0.5f + 0.2f), (rand_f() - 0.5f) * 0.6f};
+                spawn_ash_3d(p, vel, PALETTE_ASH[rand_range(1, 3)]);
             }
         }
     }
 
-    // 3D Sparks launched off the spires
-    if (intensity > 0.40f && rand_f() < 0.20f) {
-        Vec3 sp_pos = vec3_add(left_spire_w, (Vec3){(rand_f()-0.5f)*1.5f, 1.2f, (rand_f()-0.5f)*1.5f});
-        Vec3 sp_vel = (Vec3){g_wind * 0.04f, 0.14f + rand_f()*0.08f, (rand_f()-0.5f)*0.04f};
-        spawn_spark_3d(sp_pos, sp_vel, rand_range(20, 42), PALETTE_EMBERS[1]);
-    }
-    if (intensity > 0.50f && rand_f() < 0.24f) {
-        Vec3 sp_pos = vec3_add(right_spire_w, (Vec3){(rand_f()-0.5f)*1.8f, 1.8f, (rand_f()-0.5f)*1.8f});
-        Vec3 sp_vel = (Vec3){g_wind * 0.05f, 0.16f + rand_f()*0.09f, (rand_f()-0.5f)*0.04f};
-        spawn_spark_3d(sp_pos, sp_vel, rand_range(22, 48), PALETTE_EMBERS[2]);
+    // 5. 3D Sparks Ejection
+    if (intensity > 0.30f && rand_f() < 0.70f) {
+        Vec3 spark_p = (Vec3){(rand_f() - 0.5f) * 2.5f, -1.6f, (rand_f() - 0.5f) * 2.5f};
+        Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind * 1.2f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
+        RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
+        spawn_spark_3d(spark_p, spark_v, rand_range(16, 42), spark_col);
     }
 
-    // Update 3D sparks
     for (int i = 0; i < MAX_SPARKS; i++) {
-        if (!g_sparks[i].active) continue;
-        g_sparks[i].pos = vec3_add(g_sparks[i].pos, g_sparks[i].vel);
-        g_sparks[i].life--;
-        if (g_sparks[i].life <= 0 || g_sparks[i].pos.y > 10.0f) {
-            g_sparks[i].active = false;
+        if (g_sparks[i].active) {
+            g_sparks[i].pos.x += g_sparks[i].vel.x * 0.05f;
+            g_sparks[i].pos.y += g_sparks[i].vel.y * 0.05f;
+            g_sparks[i].pos.z += g_sparks[i].vel.z * 0.05f;
+            g_sparks[i].vel.y -= 0.04f; // gravity deceleration
+            g_sparks[i].life--;
+            if (g_sparks[i].life <= 0 || g_sparks[i].pos.y < -4.5f) {
+                g_sparks[i].active = false;
+            }
         }
     }
 
-    // Update 3D ash flakes
+    // 6. 3D Ash Flakes drift & accumulation on ground
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
-        if (!g_ash_flakes[i].active) continue;
-        g_ash_flakes[i].pos = vec3_add(g_ash_flakes[i].pos, g_ash_flakes[i].vel);
-        g_ash_flakes[i].pos.x += g_wind * 0.01f;
+        if (g_ash_flakes[i].active) {
+            g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.05f + sinf(g_ash_flakes[i].pos.y * 2.0f + g_sim_time) * 0.02f;
+            g_ash_flakes[i].pos.y += g_ash_flakes[i].vel.y * 0.05f;
+            g_ash_flakes[i].pos.z += g_ash_flakes[i].vel.z * 0.05f;
 
-        if (g_ash_flakes[i].pos.y <= -4.2f) {
-            g_ash_flakes[i].active = false;
+            if (g_ash_flakes[i].pos.y <= -4.15f) {
+                Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
+                int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+                int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
+                if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                    g_settled_ash[sy][sx] = 1;
+                }
+                g_ash_flakes[i].active = false;
+            }
         }
     }
 }
 
-// 3D Scene Rendering with Camera Orbit & Per-Object Pixel Art Shader
 static void render_scene(void) {
-    memset(g_id_buf, 0, sizeof(g_id_buf));
+    // Clear Framebuffers
     for (int y = 0; y < g_pixel_h; y++) {
         for (int x = 0; x < g_pixel_w; x++) {
-            g_depth_buf[y][x] = 1e9f;
             g_frame[y][x].is_sky = true;
             g_frame[y][x].color = COLOR_BLACK;
+            g_id_buf[y][x] = 0;
+            g_depth_buf[y][x] = 1e9f;
+            g_shade_buf[y][x] = COLOR_BLACK;
         }
     }
 
-    float world_w = 22.0f;
-    float world_h = 14.0f;
-
-    // Compute Camera Frame
+    // Compute Camera Vectors
     Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
     float cam_dist = 28.0f;
     Vec3 cam_pos = (Vec3){
@@ -699,28 +816,32 @@ static void render_scene(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    // Dynamic flickering light source at the center of the fire
+    float world_w = 22.0f;
+    float world_h = 14.0f;
+
+    // Fire point light positioned in the hearth core
     float flicker = 1.0f + 0.16f * sinf(g_sim_time * 8.0f) + 0.10f * cosf(g_sim_time * 13.0f);
     Vec3 light_pos = (Vec3){0.0f, -1.8f, 0.0f};
-    float light_intensity = 1.8f * flicker;
+    float light_intensity = 1.9f * flicker;
 
-    // 1. Geometric Raycast Pass (3D Cylinders with Camera Space Projection)
+    // =========================================================================
+    // 1. 3D Raycasting with Object-Space Bark Plates (No orange stripes!)
+    // =========================================================================
     for (int y = 0; y < g_pixel_h; y++) {
-        float wy = (((float)(g_pixel_h - 1 - y) / g_pixel_h) - 0.5f) * world_h;
+        float wy = (((g_pixel_h - 1 - y) / (float)g_pixel_h) - 0.5f) * world_h;
         for (int x = 0; x < g_pixel_w; x++) {
-            float wx = (((float)x / g_pixel_w) - 0.5f) * world_w;
+            float wx = ((x / (float)g_pixel_w) - 0.5f) * world_w;
 
-            // Orthographic ray in camera space (Anti-Pixel Creep)
             Vec3 ray_orig = vec3_add(cam_pos, vec3_add(vec3_scale(right, wx), vec3_scale(up, wy)));
             Vec3 ray_dir = fwd;
 
             float closest_t = 1e9f;
-            Vec3 hit_pt, hit_norm;
+            Vec3 hit_pt = {0,0,0}, hit_norm = {0,1,0};
             float hit_u = 0, hit_v = 0, hit_rf = 1.0f;
             bool hit_cap = false;
-            const Cylinder3D *hit_log = NULL;
+            Cylinder3D *hit_log = NULL;
 
-            for (int i = 0; i < 4; i++) {
+            for (int i = 0; i < g_num_logs; i++) {
                 float t, u, v, rf;
                 Vec3 pt, norm;
                 bool is_cap;
@@ -755,38 +876,57 @@ static void render_scene(void) {
 
                 if (hit_cap) {
                     // Tree Rings on End-Cap
-                    int ring_band = ((int)floorf(hit_rf * 6.0f)) % 2;
-                    int col_idx = 1 + ring_band + ((light_val > 0.80f) ? 1 : 0);
+                    float r_q = floorf(hit_rf * 8.0f) / 8.0f;
+                    int ring_band = ((int)(r_q * 8.0f)) % 2;
+                    int col_idx = 1 + ring_band + ((hit_rf > 0.70f) ? 1 : 0) + ((light_val > 0.80f) ? 1 : 0);
                     if (col_idx > 4) col_idx = 4;
                     g_shade_buf[y][x] = PALETTE_ENDCAP[col_idx];
                 } else {
-                    // Object-Space Longitudinal Bark Grain (Zero Pixel Creep)
-                    float num_u = 22.0f;
-                    float num_v = hit_log->length * 3.8f;
-                    float u_q = floorf(hit_u * num_u) / num_u;
-                    float v_q = floorf(hit_v * num_v) / num_v;
+                    // Discrete object-space bark plates (Zero Pixel Creep, no tiger stripes)
+                    float num_plates_u = 14.0f;
+                    float num_plates_v = hit_log->length * 2.2f;
+                    float u_plate = floorf(hit_u * num_plates_u);
+                    float v_plate = floorf(hit_v * num_plates_v);
 
-                    float grain = sinf(u_q * 38.0f + sinf(v_q * 10.0f) * 1.5f) * 0.5f + 0.5f;
-                    float fissure = sinf(u_q * 18.0f + v_q * 8.0f) * 0.5f + 0.5f;
-                    float bark_mod = 0.88f + 0.32f * grain;
+                    // Subtle pseudo-random plate shade variation
+                    float plate_hash = sinf(u_plate * 12.9898f + v_plate * 78.233f) * 43758.5453f;
+                    float plate_var = (plate_hash - floorf(plate_hash)) * 0.25f - 0.12f;
 
-                    bool is_crack = (fissure > 0.72f) && (l_dist < 6.0f);
+                    // Discrete furrow edge test (plate boundaries are dark crevices)
+                    float u_frac = (hit_u * num_plates_u) - u_plate;
+                    float v_frac = (hit_v * num_plates_v) - v_plate;
+                    bool is_furrow = (u_frac < 0.12f || u_frac > 0.88f || (v_frac < 0.08f && ((int)u_plate % 2 == 0)));
+
+                    // Local heat charring (based on distance to fire core and log charred factor)
+                    float dist_to_core = sqrtf(hit_pt.x * hit_pt.x + (hit_pt.y + 1.8f) * (hit_pt.y + 1.8f) + hit_pt.z * hit_pt.z);
+                    float heat_exposure = fmaxf(0.0f, 1.0f - dist_to_core / 4.8f) * hit_log->charred;
 
                     if (hit_log->ash_amount > 40.0f) {
-                        int ash_idx = (int)(light_val * bark_mod * 3.2f);
+                        int ash_idx = (int)((light_val + plate_var) * 2.2f);
                         if (ash_idx < 0) ash_idx = 0;
                         if (ash_idx > 4) ash_idx = 4;
                         g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
-                    } else if (is_crack) {
-                        int emb_idx = (int)(light_val * 3.2f);
-                        if (emb_idx < 0) emb_idx = 0;
-                        if (emb_idx > 4) emb_idx = 4;
-                        g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                    } else if (heat_exposure > 0.45f) {
+                        // Charred alligator bark with glowing ember in deep crevices
+                        if (is_furrow && heat_exposure > 0.60f) {
+                            int emb_idx = (int)(heat_exposure * 3.5f);
+                            if (emb_idx < 0) emb_idx = 0;
+                            if (emb_idx > 3) emb_idx = 3;
+                            g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                        } else {
+                            int c_idx = (int)((light_val + plate_var) * 2.2f);
+                            if (c_idx < 0) c_idx = 0;
+                            if (c_idx > 4) c_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
+                        }
+                    } else if (is_furrow) {
+                        g_shade_buf[y][x] = PALETTE_WOOD[0]; // Dark crevice
                     } else {
-                        int band = (int)(light_val * bark_mod * 3.3f);
-                        if (band < 1) band = 1;
-                        if (band > 6) band = 6;
-                        g_shade_buf[y][x] = PALETTE_WOOD[band];
+                        // Natural weathered wood tone
+                        int b_idx = (int)((light_val + plate_var) * 2.8f);
+                        if (b_idx < 1) b_idx = 1;
+                        if (b_idx > 6) b_idx = 6;
+                        g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
                     }
                 }
             }
@@ -818,83 +958,89 @@ static void render_scene(void) {
                 }
             }
 
-            g_frame[y][x].is_sky = false;
             if (is_edge) {
                 g_frame[y][x].color = PALETTE_WOOD[0]; // Dark outline
+                g_frame[y][x].is_sky = false;
             } else {
                 g_frame[y][x].color = g_shade_buf[y][x];
+                g_frame[y][x].is_sky = false;
             }
         }
     }
 
-    // 3. Volumetric Fire Layer with 3D Depth Interleaving
+    // 3. Composite Fire Heat Layer with Depth Interleaving
     for (int y = 0; y < g_pixel_h; y++) {
         for (int x = 0; x < g_pixel_w; x++) {
             float heat = g_fire_heat[y][x];
-            if (heat > 0.08f) {
-                RGB fcol;
-                if (heat > 0.82f) fcol = PALETTE_EMBERS[4];
-                else if (heat > 0.58f) fcol = PALETTE_EMBERS[3];
-                else if (heat > 0.35f) fcol = PALETTE_EMBERS[2];
-                else if (heat > 0.18f) fcol = PALETTE_EMBERS[1];
-                else fcol = PALETTE_EMBERS[0];
+            if (heat > 0.05f) {
+                RGB fire_col;
+                if (heat > 0.85f) fire_col = PALETTE_EMBERS[4];
+                else if (heat > 0.65f) fire_col = PALETTE_EMBERS[3];
+                else if (heat > 0.40f) fire_col = PALETTE_EMBERS[2];
+                else if (heat > 0.18f) fire_col = PALETTE_EMBERS[1];
+                else fire_col = PALETTE_EMBERS[0];
 
-                int log_id = g_id_buf[y][x];
-                if (log_id > 0) {
-                    float fz = g_fire_z[y][x];
-                    float lz = g_depth_buf[y][x];
-                    if (fz < lz || heat > 0.65f) {
-                        g_frame[y][x].color = fcol;
+                if (g_id_buf[y][x] > 0) {
+                    if (g_fire_z[y][x] < g_depth_buf[y][x]) {
+                        g_frame[y][x].color = fire_col;
+                        g_frame[y][x].is_sky = false;
+                    } else if (heat > 0.55f) {
+                        g_frame[y][x].color = fire_col;
                         g_frame[y][x].is_sky = false;
                     }
                 } else {
-                    g_frame[y][x].color = fcol;
+                    g_frame[y][x].color = fire_col;
                     g_frame[y][x].is_sky = false;
                 }
             }
         }
     }
 
-    // 4. Projected 3D Sparks
-    for (int i = 0; i < MAX_SPARKS; i++) {
-        if (!g_sparks[i].active) continue;
-        Vec3 rel_sp = vec3_sub(g_sparks[i].pos, cam_pos);
-        float sp_d = vec3_dot(rel_sp, fwd);
-        if (sp_d <= 0.1f) continue;
-
-        int sx = (int)(((vec3_dot(rel_sp, right) / world_w) + 0.5f) * g_pixel_w);
-        int sy = (int)((0.5f - (vec3_dot(rel_sp, up) / world_h)) * g_pixel_h);
-
-        if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
-            if (sp_d < g_depth_buf[sy][sx] || g_frame[sy][sx].is_sky) {
-                g_frame[sy][sx].color = g_sparks[i].color;
-                g_frame[sy][sx].is_sky = false;
+    // 4. Settled Ash Heap
+    for (int y = 0; y < g_pixel_h; y++) {
+        for (int x = 0; x < g_pixel_w; x++) {
+            if (g_settled_ash[y][x]) {
+                g_frame[y][x].color = PALETTE_ASH[((x + y) % 2 == 0) ? 2 : 3];
+                g_frame[y][x].is_sky = false;
             }
         }
     }
 
-    // 5. Projected 3D Ash Flakes
+    // 5. Ash Flakes Falling
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
-        if (!g_ash_flakes[i].active) continue;
-        Vec3 rel_af = vec3_sub(g_ash_flakes[i].pos, cam_pos);
-        float af_d = vec3_dot(rel_af, fwd);
-        if (af_d <= 0.1f) continue;
+        if (g_ash_flakes[i].active) {
+            Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
+            int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+            int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
+            float flake_z = vec3_dot(p_rel, fwd);
+            if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                if (flake_z < g_depth_buf[sy][sx]) {
+                    g_frame[sy][sx].color = g_ash_flakes[i].color;
+                    g_frame[sy][sx].is_sky = false;
+                }
+            }
+        }
+    }
 
-        int ax = (int)(((vec3_dot(rel_af, right) / world_w) + 0.5f) * g_pixel_w);
-        int ay = (int)((0.5f - (vec3_dot(rel_af, up) / world_h)) * g_pixel_h);
-
-        if (ax >= 0 && ax < g_pixel_w && ay >= 0 && ay < g_pixel_h) {
-            if (af_d < g_depth_buf[ay][ax] || g_frame[ay][ax].is_sky) {
-                g_frame[ay][ax].color = g_ash_flakes[i].color;
-                g_frame[ay][ax].is_sky = false;
+    // 6. Sparks Rising
+    for (int i = 0; i < MAX_SPARKS; i++) {
+        if (g_sparks[i].active) {
+            Vec3 p_rel = vec3_sub(g_sparks[i].pos, cam_pos);
+            int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+            int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
+            float spark_z = vec3_dot(p_rel, fwd);
+            if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                if (spark_z < g_depth_buf[sy][sx] || g_fire_heat[sy][sx] > 0.2f) {
+                    g_frame[sy][sx].color = g_sparks[i].color;
+                    g_frame[sy][sx].is_sky = false;
+                }
             }
         }
     }
 }
 
-// Present frame via Unicode half-blocks '▀'
 static void present_frame(void) {
-    char buf[131072];
+    static char buf[140000];
     int buf_len = 0;
 
     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[H");
@@ -904,26 +1050,26 @@ static void present_frame(void) {
     bool prev_bg_transp = true;
 
     int text_rows = g_pixel_h / 2;
-    for (int tr = 0; tr < text_rows; tr++) {
-        int y_top = tr * 2;
-        int y_bot = tr * 2 + 1;
+    for (int r = 0; r < text_rows; r++) {
+        int y_top = r * 2;
+        int y_bot = r * 2 + 1;
 
         for (int x = 0; x < g_pixel_w; x++) {
             Pixel top = g_frame[y_top][x];
             Pixel bot = g_frame[y_bot][x];
 
-            // Case A: Both sky
+            // Case A: Both sky -> space with transparent background
             if (top.is_sky && bot.is_sky) {
                 if (!prev_bg_transp) {
                     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[49m");
                     prev_bg_transp = true;
                     prev_bg_r = prev_bg_g = prev_bg_b = -1;
                 }
-                buf[buf_len++] = ' ';
+                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, " ");
                 continue;
             }
 
-            // Case B: Top is sky, Bottom is color -> ▄
+            // Case B: Top is sky, Bottom is color -> ▄ with transparent BG
             if (top.is_sky && !bot.is_sky) {
                 if (bot.color.r != prev_fg_r || bot.color.g != prev_fg_g || bot.color.b != prev_fg_b) {
                     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
@@ -988,13 +1134,17 @@ static void present_frame(void) {
     else if (g_sim_time > 35.0f) stage_name = "3/7: Fogueira Roaring";
     else if (g_sim_time > 12.0f) stage_name = "2/7: Chamas nas Toras";
 
+    const char *mode_name = "Fogueira Quadrada";
+    if (g_stack_mode == 1) mode_name = "Tenda Cônica";
+    else if (g_stack_mode == 2) mode_name = "Pirâmide";
+
     int yaw_deg = (int)roundf(g_cam_yaw * 180.0f / (float)M_PI) % 360;
     if (yaw_deg < 0) yaw_deg += 360;
     int pitch_deg = (int)roundf(g_cam_pitch * 180.0f / (float)M_PI);
 
     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-        "\033[1;33m[3D Bonfire]\033[0m %4.0fs | Fase: \033[1;37m%s\033[0m | Cam: \033[1;36m%d°/%d°%s\033[0m | [Setas/WASD] Girar | [t] Turntable | [q] Sair ",
-        g_sim_time, stage_name, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
+        "\033[1;33m[3D Bonfire]\033[0m %4.0fs | Madeira: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Cam: %d°/%d°%s | [m] Modo | [Setas/WASD] Girar | [t] Turntable | [c] Colapsar | [q] Sair ",
+        g_sim_time, mode_name, stage_name, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
 
     if (buf_len > 0) {
         safe_write(STDOUT_FILENO, buf, buf_len);
@@ -1031,11 +1181,14 @@ static void handle_input(void) {
         } else if (ch == 's' || ch == 'S' || ch == 'j') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+        } else if (ch == 'm' || ch == 'M') {
+            g_stack_mode = (g_stack_mode + 1) % 3;
+            init_scene();
         } else if (ch == 't' || ch == 'T') {
             g_auto_turntable = !g_auto_turntable;
         } else if (ch == '0' || ch == 'z' || ch == 'Z') {
-            g_cam_yaw = 0.0f;
-            g_cam_pitch = 0.32f;
+            g_cam_yaw = 0.40f;
+            g_cam_pitch = 0.35f;
             g_auto_turntable = false;
         } else if (ch == 'q' || ch == 'Q') {
             g_running = 0;
@@ -1059,6 +1212,7 @@ int main(int argc, char **argv) {
     if (argc > 2 && strcmp(argv[1], "--snapshot") == 0) {
         g_pixel_w = 120;
         g_pixel_h = 70;
+        if (argc > 6) g_stack_mode = atoi(argv[6]);
         init_scene();
         if (argc > 3) g_sim_time = atof(argv[3]);
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
@@ -1098,7 +1252,7 @@ int main(int argc, char **argv) {
         present_frame();
 
         ts.tv_sec = 0;
-        ts.tv_nsec = 24000000L; // ~40 FPS for smooth rotation
+        ts.tv_nsec = 24000000L; // ~40 FPS
         nanosleep(&ts, NULL);
     }
 
