@@ -95,13 +95,14 @@ static const RGB PALETTE_EMBERS[] = {
     {255, 255, 210}   // 4: White hot core
 };
 
-// Ash & Charcoal (Charred crust -> Dark ash -> Chalky light ash)
+// Ash & Charcoal — warm earth tones that read as accumulated burnt material
+// Center stays hot dark charcoal, outer rim transitions to chalky dusty ash
 static const RGB PALETTE_ASH[] = {
-    {38, 35, 42},     // 0: Charcoal crust
-    {68, 64, 74},     // 1: Dark ash
-    {115, 112, 122},  // 2: Mid ash grey
-    {165, 162, 172},  // 3: Light chalky ash
-    {210, 208, 218}   // 4: White ash powder
+    {28, 22, 18},     // 0: Near-black charcoal crust (inner bed)
+    {58, 50, 40},     // 1: Dark warm charcoal-brown
+    {108, 96, 80},    // 2: Medium ashy brown-grey
+    {165, 152, 132},  // 3: Warm pale ash (buff/sandy)
+    {215, 208, 195}   // 4: Chalky white ash powder (top surface)
 };
 
 typedef struct {
@@ -109,9 +110,11 @@ typedef struct {
 } Vec3;
 
 typedef struct {
-    float temp;            // [0.0, 1.0]
-    float burn_progress;   // [0.0, 1.0] (0.0=fresh, 0.4=charred black, 0.75=ash, 1.0=disintegrated)
-    float structural_mass; // [1.0, 0.0]
+    float temp;            // Thermal state [0.0 = 20C ambient, 1.0 = 900C peak]
+    float moisture;        // Moisture content [0.0 = dry, 0.18 = 18% water content]
+    float burn_progress;   // Pyrolysis progress [0.0 = fresh, 0.35 = char, 0.75 = ash, 1.0 = consumed]
+    float structural_mass; // Mechanical strength [1.0 = solid, 0.0 = broken]
+    float glow_intensity;  // Oxygen & wind-fed coal incandescence [0.0, 1.0]
 } LogSegment;
 
 typedef struct {
@@ -129,6 +132,9 @@ typedef struct {
     float collapse_cur;                // Current individual collapse progression [0.0, 1.0]
     float collapse_speed;              // Settling downward velocity
     int support_log1, support_log2;    // Log IDs that support this log (-1 = ground)
+    float sag_amount;                  // Center bowing deflection under gravity
+    float roll_angle;                  // Tipping angle as resting supports burn
+    bool snapped;                      // True if center fiber has structurally fractured
 } Cylinder3D;
 
 typedef struct {
@@ -214,9 +220,12 @@ static float g_cam_yaw = 0.40f;       // Horizontal orbit angle (radians, ~23 de
 static float g_cam_pitch = 0.35f;    // Elevation angle (radians, ~20 deg)
 static bool g_auto_turntable = false; // Auto 360 degree turntable rotation
 
-// Simulation dynamics
-static float g_sim_time = 0.0f;
-static float g_time_scale = 1.0f;
+// Simulation dynamics (Physically dimensionalized in real seconds)
+static float g_sim_time = 0.0f;       // Physical simulated time in seconds
+static float g_anim_time = 0.0f;      // Display animation time (flicker, ash drift)
+static float g_time_scale = 1.0f;     // 1.0 = Realtime, 30.0 = Fast Demo
+static bool g_realtime_mode = true;   // Realtime 1.0x vs Fast Demo 30.0x
+static bool g_show_hud = true;        // Display status header and physical clock
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
 static float g_collapse_progress = 0.0f;
@@ -297,10 +306,15 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->collapse_speed = 0.0f;
     c->support_log1 = -1;
     c->support_log2 = -1;
+    c->sag_amount = 0.0f;
+    c->roll_angle = 0.0f;
+    c->snapped = false;
     for (int s = 0; s < NUM_LOG_SEGS; s++) {
         c->segments[s].temp = 0.0f;
+        c->segments[s].moisture = 0.18f; // 18% moisture content
         c->segments[s].burn_progress = 0.0f;
         c->segments[s].structural_mass = 1.0f;
+        c->segments[s].glow_intensity = 0.0f;
     }
     recompute_cylinder_axes(c);
 }
@@ -444,54 +458,6 @@ static bool intersect_stone(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, V
         loc_n.x * st->u_tan.z + loc_n.y * st->v_up.z + loc_n.z * st->w_rad.z
     };
     *out_norm = vec3_norm(world_n);
-    return true;
-}
-
-static bool intersect_ash_bed(const AshBed3D *bed, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
-    if (bed->height < 0.08f) return false;
-    float inv_r = 1.0f / bed->radius_xz;
-    float inv_h = 1.0f / bed->height;
-
-    // Ray transformed to unit ellipsoid dome space:
-    // (x/r)^2 + ((y - cy)/h)^2 + (z/r)^2 <= 1, for y >= cy
-    Vec3 p0 = (Vec3){ (ro.x - bed->center.x) * inv_r, (ro.y - bed->center.y) * inv_h, (ro.z - bed->center.z) * inv_r };
-    Vec3 d0 = (Vec3){ rd.x * inv_r, rd.y * inv_h, rd.z * inv_r };
-
-    float a = vec3_dot(d0, d0);
-    float b = vec3_dot(p0, d0);
-    float c = vec3_dot(p0, p0) - 1.0f;
-    float disc = b * b - a * c;
-    if (disc < 0.0f) return false;
-
-    float sdisc = sqrtf(disc);
-    float t1 = (-b - sdisc) / a;
-    float t2 = (-b + sdisc) / a;
-
-    float hit_t = -1.0f;
-    if (t1 > 0.1f) {
-        Vec3 pt1 = vec3_add(ro, vec3_scale(rd, t1));
-        if (pt1.y >= bed->center.y - 0.05f) {
-            hit_t = t1;
-        }
-    }
-    if (hit_t < 0.0f && t2 > 0.1f) {
-        Vec3 pt2 = vec3_add(ro, vec3_scale(rd, t2));
-        if (pt2.y >= bed->center.y - 0.05f) {
-            hit_t = t2;
-        }
-    }
-    if (hit_t < 0.1f) return false;
-
-    Vec3 pt = vec3_add(ro, vec3_scale(rd, hit_t));
-    *out_t = hit_t;
-    *out_pt = pt;
-
-    Vec3 n_raw = (Vec3){
-        (pt.x - bed->center.x) * (inv_r * inv_r),
-        fmaxf(0.08f, pt.y - bed->center.y) * (inv_h * inv_h),
-        (pt.z - bed->center.z) * (inv_r * inv_r)
-    };
-    *out_norm = vec3_norm(n_raw);
     return true;
 }
 
@@ -653,12 +619,13 @@ static void init_scene(void) {
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
 
     g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
-    g_ash_bed.radius_xz = 5.6f;
-    g_ash_bed.height = 0.35f;
+    g_ash_bed.radius_xz = 4.8f;
+    g_ash_bed.height = 0.60f;   // Taller dome: top at y=-3.6, visible between logs
     g_ash_bed.heat = 0.35f;
     g_ash_bed.volume = 0.0f;
 
     g_sim_time = 0.0f;
+    g_anim_time = 0.0f;
     g_collapse_progress = 0.0f;
     g_force_collapse = false;
 
@@ -684,43 +651,61 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
     int best_seg = 0;
     bool is_cap = false;
 
-    // Tube Body
-    Vec3 delta_p = vec3_sub(ray_orig, c->p1);
-    Vec3 d_proj = vec3_sub(ray_dir, vec3_scale(c->dir, vec3_dot(ray_dir, c->dir)));
-    Vec3 dp_proj = vec3_sub(delta_p, vec3_scale(c->dir, vec3_dot(delta_p, c->dir)));
+    // Tube Body with Parabolic Gravity Sag Deflection
+    // If c->sag_amount > 0.01f, the cylinder axis bows downwards:
+    // delta_y(v) = - 4.0f * v * (1.0f - v) * c->sag_amount
+    int max_passes = (c->sag_amount > 0.01f) ? 2 : 1;
+    for (int pass = 0; pass < max_passes; pass++) {
+        Vec3 ro = ray_orig;
+        if (pass == 1) {
+            ro.y += c->sag_amount * 0.75f;
+        }
 
-    float a = vec3_dot(d_proj, d_proj);
-    if (a > 1e-6f) {
-        float b = 2.0f * vec3_dot(d_proj, dp_proj);
-        float cv = vec3_dot(dp_proj, dp_proj) - c->radius * c->radius;
-        float disc = b * b - 4.0f * a * cv;
-        if (disc >= 0.0f) {
-            float sdisc = sqrtf(disc);
-            float t0 = (-b - sdisc) / (2.0f * a);
-            float t1 = (-b + sdisc) / (2.0f * a);
-            float t = (t0 > 0.1f) ? t0 : t1;
-            if (t > 0.1f) {
-                Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
-                float h = vec3_dot(vec3_sub(pt, c->p1), c->dir);
-                if (h >= 0.0f && h <= c->length) {
-                    Vec3 axis_pt = vec3_add(c->p1, vec3_scale(c->dir, h));
-                    Vec3 norm = vec3_scale(vec3_sub(pt, axis_pt), 1.0f / c->radius);
-                    float v = h / c->length;
-                    float angle = atan2f(vec3_dot(norm, c->bitangent), vec3_dot(norm, c->tangent));
-                    float u = (angle + (float)M_PI) / (2.0f * (float)M_PI);
+        Vec3 delta_p = vec3_sub(ro, c->p1);
+        Vec3 d_proj = vec3_sub(ray_dir, vec3_scale(c->dir, vec3_dot(ray_dir, c->dir)));
+        Vec3 dp_proj = vec3_sub(delta_p, vec3_scale(c->dir, vec3_dot(delta_p, c->dir)));
 
-                    int seg = (int)(v * NUM_LOG_SEGS);
-                    if (seg < 0) seg = 0;
-                    if (seg >= NUM_LOG_SEGS) seg = NUM_LOG_SEGS - 1;
+        float a = vec3_dot(d_proj, d_proj);
+        if (a > 1e-6f) {
+            float b = 2.0f * vec3_dot(d_proj, dp_proj);
+            float cv = vec3_dot(dp_proj, dp_proj) - c->radius * c->radius;
+            float disc = b * b - 4.0f * a * cv;
+            if (disc >= 0.0f) {
+                float sdisc = sqrtf(disc);
+                float t0 = (-b - sdisc) / (2.0f * a);
+                float t1 = (-b + sdisc) / (2.0f * a);
+                float t = (t0 > 0.1f) ? t0 : t1;
+                if (t > 0.1f && t < best_t) {
+                    Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
+                    float h = vec3_dot(vec3_sub(pt, c->p1), c->dir);
+                    if (h >= 0.0f && h <= c->length) {
+                        float v = h / c->length;
+                        float sag_y = (c->sag_amount > 0.01f) ? (4.0f * v * (1.0f - v) * c->sag_amount) : 0.0f;
+                        Vec3 axis_pt = vec3_add(c->p1, vec3_scale(c->dir, h));
+                        axis_pt.y -= sag_y;
 
-                    best_t = t;
-                    best_pt = pt;
-                    best_norm = norm;
-                    best_u = u;
-                    best_v = v;
-                    best_seg = seg;
-                    is_cap = false;
-                    hit = true;
+                        Vec3 d_axis = vec3_sub(pt, axis_pt);
+                        float dist_to_axis = vec3_len(d_axis);
+                        if (dist_to_axis <= c->radius * 1.15f) {
+                            Vec3 norm = vec3_scale(d_axis, 1.0f / (dist_to_axis + 1e-6f));
+                            float angle = atan2f(vec3_dot(norm, c->bitangent), vec3_dot(norm, c->tangent));
+                            float u = (angle + (float)M_PI) / (2.0f * (float)M_PI);
+
+                            int seg = (int)(v * NUM_LOG_SEGS);
+                            if (seg < 0) seg = 0;
+                            if (seg >= NUM_LOG_SEGS) seg = NUM_LOG_SEGS - 1;
+
+                            best_t = t;
+                            best_pt = pt;
+                            best_norm = norm;
+                            best_u = u;
+                            best_v = v;
+                            best_seg = seg;
+                            is_cap = false;
+                            hit = true;
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -810,7 +795,12 @@ static void spawn_ash_3d(Vec3 pos, Vec3 vel, RGB color) {
 static void update_simulation(void) {
     if (g_paused) return;
 
-    g_sim_time += 0.045f * g_time_scale;
+    // Physical time dimensionalization:
+    // dt_frame = 0.025s (approx 40 FPS real terminal display)
+    // Physical simulation step dt = 0.025s * g_time_scale
+    float dt = 0.025f * g_time_scale;
+    g_sim_time += dt;
+    g_anim_time += 0.025f;
 
     // Ambient Wind oscillation
     if (rand_f() < 0.05f) {
@@ -820,189 +810,261 @@ static void update_simulation(void) {
 
     // Auto-turntable continuous orbit
     if (g_auto_turntable) {
-        g_cam_yaw += 0.015f * g_time_scale;
+        g_cam_yaw += 0.015f * (g_realtime_mode ? 1.0f : fminf(2.5f, g_time_scale * 0.08f));
         if (g_cam_yaw > 2.0f * (float)M_PI) g_cam_yaw -= 2.0f * (float)M_PI;
     }
 
-    // -------------------------------------------------------------------------
-    // PHYSICAL WOOD SEGMENT PROPAGATION (NO FAKE FLOOR FIRE!)
-    // -------------------------------------------------------------------------
-    // Center kindling nest position:
+    // Sub-stepping for numerical stability:
+    // Guarantees stable diffusion & evaporation equations regardless of speed
+    float sub_dt_target = 0.025f;
+    int num_substeps = (int)ceilf(dt / sub_dt_target);
+    if (num_substeps < 1) num_substeps = 1;
+    if (num_substeps > 120) num_substeps = 120;
+    float step_dt = dt / (float)num_substeps;
+
+    // Kindling nest position
     Vec3 kindle_pos = (Vec3){0.0f, -2.6f, 0.0f};
-    float kindle_heat = 0.0f;
-    if (g_sim_time < 22.0f) {
-        kindle_heat = fmaxf(0.0f, 1.0f - (g_sim_time / 22.0f));
-    }
 
-    // -------------------------------------------------------------------------
-    // HETEROGENEOUS PIECE-BY-PIECE COMBUSTION WITH RADIAL CORE DRAFT
-    // -------------------------------------------------------------------------
-    for (int i = 0; i < g_num_logs; i++) {
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
-            Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+    for (int step = 0; step < num_substeps; step++) {
+        float cur_sim_t = g_sim_time - dt + (step + 1) * step_dt;
+        float kindle_heat = 0.0f;
+        if (cur_sim_t < 180.0f) {
+            kindle_heat = fmaxf(0.0f, 1.0f - (cur_sim_t / 180.0f));
+        }
 
-            // Radial distance from hearth center axis (0, y, 0)
-            float r_seg = sqrtf(seg_p.x * seg_p.x + seg_p.z * seg_p.z);
-            // Core chimney convective draft factor: intense at center, zero at outer ends
-            float r_norm = r_seg / 3.6f;
-            float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+        // ---------------------------------------------------------------------
+        // HETEROGENEOUS SEGMENT THERMODYNAMICS & COMBUSTION
+        // ---------------------------------------------------------------------
+        for (int i = 0; i < g_num_logs; i++) {
+            for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+                Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
 
-            // 1. Initial kindling nest heat (concentrated in center core)
-            if (kindle_heat > 0.05f) {
-                float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
-                float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.5f);
-                if (d_surf < 2.5f) {
-                    g_logs[i].segments[s].temp += 0.018f * (1.0f - d_surf / 2.5f) * kindle_heat * eta_r * g_time_scale;
+                // Parabolic gravity sagging deflection on segment position
+                if (g_logs[i].sag_amount > 0.01f) {
+                    seg_p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
                 }
-            }
 
-            // 2. Ash bed radiant ember heat (fuels logs from below in center)
-            if (g_ash_bed.heat > 0.15f && seg_p.y < 0.2f) {
-                float bed_dy = fmaxf(0.0f, seg_p.y - g_ash_bed.center.y);
-                if (bed_dy < 3.2f) {
-                    float bed_fac = (1.0f - bed_dy / 3.2f) * eta_r;
-                    g_logs[i].segments[s].temp += 0.005f * g_ash_bed.heat * bed_fac * g_time_scale;
+                // Radial distance from hearth center axis (0, y, 0)
+                float r_seg = sqrtf(seg_p.x * seg_p.x + seg_p.z * seg_p.z);
+                float r_norm = r_seg / 3.6f;
+                float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+
+                // 1. Initial kindling nest heat (concentrated in center core)
+                if (kindle_heat > 0.02f) {
+                    float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
+                    float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.5f);
+                    if (d_surf < 2.5f) {
+                        g_logs[i].segments[s].temp += 0.0075f * (1.0f - d_surf / 2.5f) * kindle_heat * eta_r * step_dt;
+                    }
                 }
-            }
 
-            // 3. Cross-log fire radiation from actively burning segments within draft core
-            for (int j = 0; j < g_num_logs; j++) {
-                if (i == j) continue;
-                for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
-                    if (g_logs[j].segments[sj].temp > 0.38f && g_logs[j].segments[sj].structural_mass > 0.10f) {
-                        float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
-                        Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
-                        float d_cross = vec3_len(vec3_sub(seg_p, pj));
-                        float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
-                        if (d_cross_surf < 1.3f) {
-                            float rad_power = (1.0f - d_cross_surf / 1.3f) * (0.25f + 0.75f * eta_r);
-                            g_logs[i].segments[s].temp += 0.004f * rad_power * g_time_scale;
+                // 2. Ash bed radiant ember heat (fuels logs from below in center)
+                if (g_ash_bed.heat > 0.15f && seg_p.y < 0.2f) {
+                    float bed_dy = fmaxf(0.0f, seg_p.y - g_ash_bed.center.y);
+                    if (bed_dy < 3.2f) {
+                        float bed_fac = (1.0f - bed_dy / 3.2f) * eta_r;
+                        g_logs[i].segments[s].temp += 0.00045f * g_ash_bed.heat * bed_fac * step_dt;
+                    }
+                }
+
+                // 3. Cross-log fire radiation from actively burning segments within draft core
+                for (int j = 0; j < g_num_logs; j++) {
+                    if (i == j) continue;
+                    for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
+                        if (g_logs[j].segments[sj].burn_progress > 0.05f && g_logs[j].segments[sj].temp > 0.35f && g_logs[j].segments[sj].structural_mass > 0.10f) {
+                            float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
+                            Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
+                            float d_cross = vec3_len(vec3_sub(seg_p, pj));
+                            float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
+                            if (d_cross_surf < 1.3f) {
+                                float rad_power = (1.0f - d_cross_surf / 1.3f) * (0.25f + 0.75f * eta_r);
+                                g_logs[i].segments[s].temp += 0.00065f * rad_power * step_dt;
+                            }
+                        }
+                    }
+                }
+
+                // 4. Moisture Evaporation & Latent Heat Clamping
+                if (g_logs[i].segments[s].temp > 0.10f && g_logs[i].segments[s].moisture > 0.001f) {
+                    float evap = 0.00055f * (g_logs[i].segments[s].temp - 0.08f) * step_dt;
+                    if (evap > g_logs[i].segments[s].moisture) evap = g_logs[i].segments[s].moisture;
+                    g_logs[i].segments[s].moisture -= evap;
+                }
+                if (g_logs[i].segments[s].moisture > 0.005f) {
+                    // Boiling water phase change clamps temperature to ~100C (0.24 normalized)
+                    if (g_logs[i].segments[s].temp > 0.24f) {
+                        g_logs[i].segments[s].temp = 0.24f;
+                    }
+                }
+
+                // 5. Conservative 1D thermal diffusion along wood grain (insulated by char crust)
+                float cur = g_logs[i].segments[s].temp;
+                float prev_t = (s > 0) ? g_logs[i].segments[s-1].temp : cur;
+                float next_t = (s < NUM_LOG_SEGS - 1) ? g_logs[i].segments[s+1].temp : cur;
+                float laplacian = prev_t - 2.0f * cur + next_t;
+                float k_eff = 0.0018f * (1.0f - 0.65f * g_logs[i].segments[s].burn_progress);
+                g_logs[i].segments[s].temp += k_eff * laplacian * step_dt;
+
+                // 6. Ambient convective cooling (outer ends exposed to cold air cool down rapidly)
+                float cool_factor = 1.0f - 0.75f * eta_r;
+                g_logs[i].segments[s].temp -= 0.00025f * cur * cool_factor * step_dt;
+
+                // 7. Active combustion & Pyrolysis: requires dry wood (moisture <= 0.005) and T > 0.35
+                if (g_logs[i].segments[s].moisture <= 0.005f && g_logs[i].segments[s].temp > 0.35f) {
+                    if (eta_r > 0.05f) {
+                        float exo = 0.00045f * (g_logs[i].segments[s].temp - 0.30f) * eta_r * g_logs[i].segments[s].structural_mass * step_dt;
+                        g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + exo);
+                        float burn_rate = 0.00045f * (g_logs[i].segments[s].temp - 0.30f) * (0.20f + 0.80f * eta_r) * step_dt;
+                        g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
+                    } else {
+                        float burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.30f) * step_dt;
+                        g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
+                    }
+
+                    // Update physical structural mass
+                    g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.25f);
+
+                    // Shed ash flakes as segment becomes crumbly
+                    if (g_logs[i].segments[s].burn_progress > 0.55f && rand_f() < (0.04f * step_dt * 40.0f)) {
+                        float angle = rand_f() * 6.28318f;
+                        Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
+                                                vec3_scale(g_logs[i].bitangent, sinf(angle)));
+                        Vec3 ash_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
+                        Vec3 vel = (Vec3){
+                            (rand_f() - 0.5f) * 0.3f + g_wind * 0.3f,
+                            -(rand_f() * 0.25f + 0.15f),
+                            (rand_f() - 0.5f) * 0.3f
+                        };
+                        spawn_ash_3d(ash_p, vel, PALETTE_ASH[rand_range(2, 3)]);
+                    }
+                }
+
+                // Fuel depletion & calcification
+                if (g_logs[i].segments[s].burn_progress > 0.85f) {
+                    g_logs[i].segments[s].temp = fmaxf(0.10f, g_logs[i].segments[s].temp - 0.00015f * step_dt);
+                }
+                if (g_logs[i].segments[s].temp < 0.0f) g_logs[i].segments[s].temp = 0.0f;
+
+                // 8. Air Draft & Coal Incandescence
+                float v_air = eta_r * (0.75f + 0.50f * g_logs[i].segments[s].temp) + 0.60f * fabsf(g_wind);
+                float glow = g_logs[i].segments[s].temp * fminf(1.0f, 0.35f + 0.65f * v_air);
+                if (g_logs[i].segments[s].moisture > 0.05f) glow *= 0.15f;
+                g_logs[i].segments[s].glow_intensity = glow;
+
+                // 9. Sap Pocket Pops (Crackling spark bursts)
+                if (g_logs[i].segments[s].temp > 0.45f && g_logs[i].segments[s].burn_progress >= 0.15f && g_logs[i].segments[s].burn_progress <= 0.75f) {
+                    if (rand_f() < (0.015f * step_dt * 40.0f)) {
+                        int num_sp = rand_range(6, 10);
+                        for (int sp = 0; sp < num_sp; sp++) {
+                            float angle = rand_f() * 6.28318f;
+                            Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
+                                                    vec3_scale(g_logs[i].bitangent, sinf(angle)));
+                            Vec3 sp_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
+                            Vec3 pop_v = (Vec3){
+                                rad_dir.x * (rand_f() * 3.5f + 2.0f) + g_wind * 1.5f,
+                                rand_f() * 4.5f + 3.0f,
+                                rad_dir.z * (rand_f() * 3.5f + 2.0f)
+                            };
+                            spawn_spark_3d(sp_p, pop_v, rand_range(20, 55), PALETTE_EMBERS[rand_range(2, 4)]);
                         }
                     }
                 }
             }
+        }
 
-            // 4. Conservative 1D thermal diffusion along wood grain (slow heat creep)
-            float cur = g_logs[i].segments[s].temp;
-            float prev_t = (s > 0) ? g_logs[i].segments[s-1].temp : cur;
-            float next_t = (s < NUM_LOG_SEGS - 1) ? g_logs[i].segments[s+1].temp : cur;
-            float laplacian = prev_t - 2.0f * cur + next_t;
-            g_logs[i].segments[s].temp += 0.0016f * laplacian * g_time_scale;
+        // ---------------------------------------------------------------------
+        // ASH BED & REACTION STATUS
+        // ---------------------------------------------------------------------
+        float total_mass = 0.0f;
+        int total_segs = g_num_logs * NUM_LOG_SEGS;
+        int active_burning_segs = 0;
+        for (int i = 0; i < g_num_logs; i++) {
+            for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                total_mass += g_logs[i].segments[s].structural_mass;
+                if (g_logs[i].segments[s].temp > 0.35f && g_logs[i].segments[s].moisture <= 0.005f) active_burning_segs++;
+            }
+        }
+        float avg_mass = total_mass / (float)total_segs;
+        float burnt_mass = 1.0f - avg_mass;
 
-            // 5. Ambient convective cooling (outer ends exposed to cold air cool down rapidly)
-            float cool_factor = 1.0f - 0.75f * eta_r;
-            g_logs[i].segments[s].temp -= 0.0022f * cur * cool_factor * g_time_scale;
+        // Ash bed height: smooth exponential approach to target height
+        // Never recalculate every sub-step directly — smooth to avoid geometry glitch
+        float target_height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
+        float smooth_rate = 1.0f - expf(-step_dt * 0.8f); // ~0.8 Hz convergence
+        g_ash_bed.height += (target_height - g_ash_bed.height) * smooth_rate;
 
-            // 6. Active combustion & calcification: sustained only if hot and fueled by draft
-            if (g_logs[i].segments[s].temp > 0.35f) {
-                if (eta_r > 0.05f) {
-                    g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + 0.0035f * eta_r * g_time_scale);
-                    float burn_rate = 0.00042f * (g_logs[i].segments[s].temp - 0.30f) * (0.20f + 0.80f * eta_r);
-                    g_logs[i].segments[s].burn_progress += burn_rate * g_time_scale;
-                } else {
-                    g_logs[i].segments[s].burn_progress += 0.00008f * g_time_scale;
+        if (active_burning_segs > 0) {
+            g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.0005f * step_dt * 40.0f);
+        } else if (cur_sim_t > 180.0f) {
+            g_ash_bed.heat = fmaxf(0.12f, g_ash_bed.heat - 0.0001f * step_dt * 40.0f);
+        }
+
+        // ---------------------------------------------------------------------
+        // GRAVITY SAGGING, SNAP FRACTURE & COLLAPSE SETTLING
+        // ---------------------------------------------------------------------
+        for (int i = 0; i < g_num_logs; i++) {
+            float support_integrity = 1.0f;
+            if (g_logs[i].support_log1 >= 0 && g_logs[i].support_log1 < g_num_logs) {
+                int s1 = g_logs[i].support_log1;
+                float s1_m = (g_logs[s1].segments[3].structural_mass + g_logs[s1].segments[8].structural_mass) * 0.5f;
+                float s1_eff = s1_m * (1.0f - g_logs[s1].collapse_cur * 0.65f);
+                support_integrity = fminf(support_integrity, s1_eff);
+            }
+            if (g_logs[i].support_log2 >= 0 && g_logs[i].support_log2 < g_num_logs) {
+                int s2 = g_logs[i].support_log2;
+                float s2_m = (g_logs[s2].segments[3].structural_mass + g_logs[s2].segments[8].structural_mass) * 0.5f;
+                float s2_eff = s2_m * (1.0f - g_logs[s2].collapse_cur * 0.65f);
+                support_integrity = fminf(support_integrity, s2_eff);
+            }
+
+            // Own central segments integrity
+            float own_center_mass = (g_logs[i].segments[4].structural_mass + g_logs[i].segments[5].structural_mass + g_logs[i].segments[6].structural_mass) / 3.0f;
+            float log_integrity = fminf(support_integrity, own_center_mass);
+
+            // Gravity sagging calculation
+            if (own_center_mass < 0.65f) {
+                g_logs[i].sag_amount = 0.55f * (1.0f - own_center_mass) * (1.0f - own_center_mass);
+            }
+
+            // Snap fracture when central mass is structurally exhausted
+            if (own_center_mass < 0.22f && !g_logs[i].snapped) {
+                g_logs[i].snapped = true;
+                // Structural break spark burst
+                Vec3 ctr_p = vec3_scale(vec3_add(g_logs[i].p1, g_logs[i].p2), 0.5f);
+                ctr_p.y -= g_logs[i].sag_amount;
+                for (int sp = 0; sp < 12; sp++) {
+                    Vec3 snap_v = (Vec3){(rand_f() - 0.5f) * 2.5f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 2.5f};
+                    spawn_spark_3d(ctr_p, snap_v, rand_range(25, 60), PALETTE_EMBERS[rand_range(2, 4)]);
                 }
+            }
 
-                // Update physical structural mass
-                g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.25f);
+            float target_c = 0.0f;
+            if (g_force_collapse || g_logs[i].snapped) {
+                target_c = 1.0f;
+            } else if (log_integrity < 0.45f) {
+                target_c = fminf(1.0f, (0.45f - log_integrity) / 0.45f);
+            }
 
-                // Shed ash flakes as segment becomes crumbly
-                if (g_logs[i].segments[s].burn_progress > 0.60f && rand_f() < 0.04f) {
-                    float angle = rand_f() * 6.28318f;
-                    Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
-                                            vec3_scale(g_logs[i].bitangent, sinf(angle)));
-                    Vec3 ash_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
-                    Vec3 vel = (Vec3){
-                        (rand_f() - 0.5f) * 0.3f + g_wind * 0.3f,
-                        -(rand_f() * 0.25f + 0.15f),
-                        (rand_f() - 0.5f) * 0.3f
-                    };
-                    spawn_ash_3d(ash_p, vel, PALETTE_ASH[rand_range(2, 3)]);
+            if (target_c > g_logs[i].collapse_cur) {
+                g_logs[i].collapse_speed += (g_logs[i].snapped ? 0.0040f : 0.0018f) * step_dt * 40.0f;
+                g_logs[i].collapse_cur += g_logs[i].collapse_speed;
+                if (g_logs[i].collapse_cur >= target_c) {
+                    g_logs[i].collapse_cur = target_c;
+                    g_logs[i].collapse_speed = 0.0f;
                 }
             }
 
-            // Calcification and fuel depletion
-            if (g_logs[i].segments[s].burn_progress > 0.85f) {
-                g_logs[i].segments[s].temp = fmaxf(0.12f, g_logs[i].segments[s].temp - 0.0012f * g_time_scale);
-            }
-            if (g_logs[i].segments[s].temp < 0.0f) g_logs[i].segments[s].temp = 0.0f;
+            float c = g_logs[i].collapse_cur;
+            g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
+            g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
+            g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+
+            g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
+            g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
+            g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
+            recompute_cylinder_axes(&g_logs[i]);
         }
-    }
-
-    // -------------------------------------------------------------------------
-    // ASYNCHRONOUS SEGMENT-DRIVEN COLLAPSE PHYSICS
-    // -------------------------------------------------------------------------
-    float total_mass = 0.0f;
-    int total_segs = g_num_logs * NUM_LOG_SEGS;
-    int active_burning_segs = 0;
-    for (int i = 0; i < g_num_logs; i++) {
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            total_mass += g_logs[i].segments[s].structural_mass;
-            if (g_logs[i].segments[s].temp > 0.35f) active_burning_segs++;
-        }
-    }
-    float avg_mass = total_mass / (float)total_segs;
-    float burnt_mass = 1.0f - avg_mass;
-
-    // Ash bed height builds up organically as wood is consumed
-    g_ash_bed.height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
-
-    // Ash bed heat tracks active fire and stays hot as an ember bed
-    if (active_burning_segs > 0) {
-        g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.003f * g_time_scale);
-    } else if (g_sim_time > 25.0f) {
-        g_ash_bed.heat = fmaxf(0.12f, g_ash_bed.heat - 0.0003f * g_time_scale);
-    }
-
-    // Individual collapse calculation per log based on supporting contacts & core mass
-    for (int i = 0; i < g_num_logs; i++) {
-        float support_integrity = 1.0f;
-        if (g_logs[i].support_log1 >= 0 && g_logs[i].support_log1 < g_num_logs) {
-            int s1 = g_logs[i].support_log1;
-            float s1_m = (g_logs[s1].segments[3].structural_mass + g_logs[s1].segments[8].structural_mass) * 0.5f;
-            float s1_eff = s1_m * (1.0f - g_logs[s1].collapse_cur * 0.65f);
-            support_integrity = fminf(support_integrity, s1_eff);
-        }
-        if (g_logs[i].support_log2 >= 0 && g_logs[i].support_log2 < g_num_logs) {
-            int s2 = g_logs[i].support_log2;
-            float s2_m = (g_logs[s2].segments[3].structural_mass + g_logs[s2].segments[8].structural_mass) * 0.5f;
-            float s2_eff = s2_m * (1.0f - g_logs[s2].collapse_cur * 0.65f);
-            support_integrity = fminf(support_integrity, s2_eff);
-        }
-
-        // Own central segments integrity (segments 4, 5, 6 in the hottest center)
-        float own_center_mass = (g_logs[i].segments[4].structural_mass + g_logs[i].segments[5].structural_mass + g_logs[i].segments[6].structural_mass) / 3.0f;
-        float log_integrity = fminf(support_integrity, own_center_mass);
-
-        // When integrity drops below critical break threshold, collapse triggers
-        float target_c = 0.0f;
-        if (g_force_collapse) {
-            target_c = 1.0f;
-        } else if (log_integrity < 0.45f) {
-            target_c = (0.45f - log_integrity) / 0.45f;
-            if (target_c > 1.0f) target_c = 1.0f;
-        }
-
-        // Dynamic gravitational settling
-        if (target_c > g_logs[i].collapse_cur) {
-            g_logs[i].collapse_speed += 0.0020f * g_time_scale;
-            g_logs[i].collapse_cur += g_logs[i].collapse_speed;
-            if (g_logs[i].collapse_cur >= target_c) {
-                g_logs[i].collapse_cur = target_c;
-                g_logs[i].collapse_speed = 0.0f;
-            }
-        }
-
-        float c = g_logs[i].collapse_cur;
-        g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
-        g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
-        g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
-
-        g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
-        g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
-        g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
-        recompute_cylinder_axes(&g_logs[i]);
     }
 
     // -------------------------------------------------------------------------
@@ -1027,7 +1089,8 @@ static void update_simulation(void) {
     memset(g_next_fire, 0, sizeof(g_next_fire));
 
     // 1. Kindling flame (early stage only)
-    if (kindle_heat > 0.05f) {
+    float cur_kindle_heat = (g_sim_time < 180.0f) ? fmaxf(0.0f, 1.0f - (g_sim_time / 180.0f)) : 0.0f;
+    if (cur_kindle_heat > 0.05f) {
         Vec3 rel_k = vec3_sub(kindle_pos, cam_pos);
         int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
         int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
@@ -1040,7 +1103,7 @@ static void update_simulation(void) {
                 if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
                     float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
                     if (d < 3.2f) {
-                        float h = kindle_heat * 0.85f * (1.0f - d / 3.2f);
+                        float h = cur_kindle_heat * 0.85f * (1.0f - d / 3.2f);
                         g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
                         g_fire_z[py][px] = kz - 0.25f;
                     }
@@ -1053,16 +1116,20 @@ static void update_simulation(void) {
     for (int i = 0; i < g_num_logs; i++) {
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             float temp = g_logs[i].segments[s].temp;
-            if (temp > 0.38f) {
+            float moisture = g_logs[i].segments[s].moisture;
+            // Only dried segments ignite into open flames!
+            if (temp > 0.38f && moisture <= 0.02f) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                if (g_logs[i].sag_amount > 0.01f) {
+                    p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
+                }
 
                 // Radial draft factor
                 float r_seg = sqrtf(p.x * p.x + p.z * p.z);
                 float r_norm = r_seg / 3.4f;
                 float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
 
-                // Only segments within the central chimney generate tall flames!
                 if (eta_r <= 0.08f) continue;
 
                 Vec3 rel_p = vec3_sub(p, cam_pos);
@@ -1120,12 +1187,14 @@ static void update_simulation(void) {
 
     // 4. Sparks Ejection from burning wood
     if (rand_f() < 0.65f) {
-        // Pick a burning segment
         for (int i = 0; i < g_num_logs; i++) {
             int s = rand_range(0, NUM_LOG_SEGS - 1);
             if (g_logs[i].segments[s].temp > 0.50f) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                if (g_logs[i].sag_amount > 0.01f) {
+                    p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
+                }
                 Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind * 1.2f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
                 RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
                 spawn_spark_3d(p, spark_v, rand_range(16, 42), spark_col);
@@ -1150,7 +1219,7 @@ static void update_simulation(void) {
     // 5. 3D Ash Flakes drift & accumulation into 3D Ash Bed
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
-            g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.04f + sinf(g_ash_flakes[i].pos.y * 1.5f + g_sim_time) * 0.015f;
+            g_ash_flakes[i].pos.x += g_ash_flakes[i].vel.x * 0.04f + sinf(g_ash_flakes[i].pos.y * 1.5f + g_anim_time * 2.0f) * 0.015f;
             g_ash_flakes[i].pos.y += g_ash_flakes[i].vel.y * 0.04f;
             g_ash_flakes[i].pos.z += g_ash_flakes[i].vel.z * 0.04f;
 
@@ -1162,7 +1231,7 @@ static void update_simulation(void) {
             if (g_ash_flakes[i].pos.y <= floor_y) {
                 if (r_sq < r_bed * r_bed) {
                     g_ash_bed.volume += 0.002f;
-                    g_ash_bed.height = fminf(1.4f, 0.35f + g_ash_bed.volume);
+                    // height is driven by the smoothed target in update_simulation
                 }
                 g_ash_flakes[i].active = false;
             }
@@ -1199,7 +1268,7 @@ static void render_scene(void) {
     float world_h = 14.0f;
 
     // Fire point light positioned in the hearth core
-    float flicker = 1.0f + 0.16f * sinf(g_sim_time * 8.0f) + 0.10f * cosf(g_sim_time * 13.0f);
+    float flicker = 1.0f + 0.16f * sinf(g_anim_time * 8.0f) + 0.10f * cosf(g_anim_time * 13.0f);
     Vec3 light_pos = (Vec3){0.0f, -1.8f, 0.0f};
     float light_intensity = 1.9f * flicker;
 
@@ -1262,16 +1331,25 @@ static void render_scene(void) {
                 }
             }
 
-            // Test 3D Ash Bed (Leito de cinzas central)
+            // Test ground/ash bed plane — flat at ground_y, inside stone ring radius
+            // This is more realistic than a dome: ash lies on the floor between logs
             Vec3 ash_bed_pt = {0,0,0}, ash_bed_norm = {0,1,0};
-            float ab_t;
-            Vec3 ab_p, ab_n;
-            if (intersect_ash_bed(&g_ash_bed, ray_orig, ray_dir, &ab_t, &ab_p, &ab_n)) {
-                if (ab_t < closest_t) {
-                    closest_t = ab_t;
-                    ash_bed_pt = ab_p;
-                    ash_bed_norm = ab_n;
-                    hit_type = 3;
+            {
+                float ground_plane_y = -4.2f;
+                // Ray-plane intersection: (ray_orig.y + t * ray_dir.y) = ground_plane_y
+                if (ray_dir.y < -0.001f) {  // Ray must point downward to hit ground
+                    float gp_t = (ground_plane_y - ray_orig.y) / ray_dir.y;
+                    if (gp_t > 0.1f && gp_t < closest_t) {
+                        Vec3 gp_pt = vec3_add(ray_orig, vec3_scale(ray_dir, gp_t));
+                        // Only show ash within the stone ring (~5.2 units from center)
+                        float gp_r = sqrtf(gp_pt.x * gp_pt.x + gp_pt.z * gp_pt.z);
+                        if (gp_r < 5.2f) {
+                            closest_t = gp_t;
+                            ash_bed_pt = gp_pt;
+                            ash_bed_norm = (Vec3){0.0f, 1.0f, 0.0f};
+                            hit_type = 3;
+                        }
+                    }
                 }
             }
 
@@ -1308,6 +1386,8 @@ static void render_scene(void) {
 
                 float burn = hit_log->segments[hit_seg].burn_progress;
                 float seg_temp = hit_log->segments[hit_seg].temp;
+                float glow = hit_log->segments[hit_seg].glow_intensity;
+                float moisture = hit_log->segments[hit_seg].moisture;
 
                 if (hit_cap) {
                     float r_q = floorf(hit_rf * 8.0f) / 8.0f;
@@ -1328,11 +1408,13 @@ static void render_scene(void) {
                     if (burn > 0.70f) {
                         // STAGE: Calcified Ash & Embers
                         if (is_furrow) {
-                            if (seg_temp > 0.30f) {
-                                int emb_idx = (int)(seg_temp * 3.5f);
+                            if (glow > 0.10f) {
+                                int emb_idx = (int)(glow * 3.8f);
                                 if (emb_idx < 0) emb_idx = 0;
-                                if (emb_idx > 3) emb_idx = 3;
+                                if (emb_idx > 4) emb_idx = 4;
                                 g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                            } else if (seg_temp > 0.25f) {
+                                g_shade_buf[y][x] = PALETTE_EMBERS[0];
                             } else {
                                 g_shade_buf[y][x] = PALETTE_CHARRED[0];
                             }
@@ -1361,10 +1443,11 @@ static void render_scene(void) {
                         }
                     } else if (burn > 0.40f) {
                         // STAGE: Active Combustion & Alligator Charring
-                        if (is_furrow && seg_temp > 0.40f) {
-                            int emb_idx = (int)(seg_temp * 3.5f);
+                        if (is_furrow && (glow > 0.12f || seg_temp > 0.38f)) {
+                            float hotness = fmaxf(glow, seg_temp * 0.85f);
+                            int emb_idx = (int)(hotness * 3.8f);
                             if (emb_idx < 0) emb_idx = 0;
-                            if (emb_idx > 3) emb_idx = 3;
+                            if (emb_idx > 4) emb_idx = 4;
                             g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                         } else {
                             if (burn > 0.55f && log_norm.y > 0.45f) {
@@ -1393,6 +1476,7 @@ static void render_scene(void) {
                             g_shade_buf[y][x] = PALETTE_WOOD[0];
                         } else {
                             int b_idx = (int)(light_val * 2.8f);
+                            if (moisture > 0.08f && b_idx > 1) b_idx--; // Damp wood darkening
                             if (b_idx < 1) b_idx = 1;
                             if (b_idx > 6) b_idx = 6;
                             g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
@@ -1409,40 +1493,78 @@ static void render_scene(void) {
                 Vec3 l_dir = vec3_norm(l_vec);
                 float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
                 float ndotl = fmaxf(0.0f, vec3_dot(ash_bed_norm, l_dir));
-                float ambient = 0.24f + 0.12f * fmaxf(0.0f, ash_bed_norm.y);
-                float s_val = ndotl * atten * light_intensity * 2.2f + ambient;
+                float ambient = 0.20f + 0.14f * fmaxf(0.0f, ash_bed_norm.y);
+                float s_val = ndotl * atten * light_intensity * 2.0f + ambient;
 
+                // Radial position on the ash bed surface (0 = center, 1 = edge)
                 float r_core = sqrtf(ash_bed_pt.x * ash_bed_pt.x + ash_bed_pt.z * ash_bed_pt.z);
-                float core_heat = g_ash_bed.heat * fmaxf(0.0f, 1.0f - r_core / 4.8f);
+                float r_norm_bed = fminf(1.0f, r_core / g_ash_bed.radius_xz);
+                float core_heat = g_ash_bed.heat * fmaxf(0.0f, 1.0f - r_core / 4.2f);
 
-                // Continuous cellular fissure pattern
+                // Height factor — points near the top of the dome get more light ash
+                float h_factor = fmaxf(0.0f, ash_bed_norm.y); // upward-facing = top surface
+
+                // Natural ash accumulation noise — irregular pockets and mounds
+                float n1 = sinf(ash_bed_pt.x * 2.1f + 0.3f) * cosf(ash_bed_pt.z * 1.8f + 0.7f);
+                float n2 = sinf(ash_bed_pt.x * 0.7f + ash_bed_pt.z * 1.1f + 1.2f);
+                float surface_noise = (n1 * 0.6f + n2 * 0.4f) * 0.5f + 0.5f;  // [0, 1]
+
+                // Fissure pattern — cracks where embers peek through
                 float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
                 float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
                 float fissure = fabsf(f1 * f2);
 
-                if (fissure < 0.18f && core_heat > 0.22f) {
-                    // Deep incandescent ember vein peeking through the ash bed
-                    int emb_idx = (int)(core_heat * 3.8f);
+                if (fissure < 0.15f && core_heat > 0.25f) {
+                    // Incandescent ember vein glowing through fissures
+                    float emb_heat = core_heat * (1.0f - fissure / 0.15f);
+                    int emb_idx = (int)(emb_heat * 3.5f);
                     if (emb_idx < 0) emb_idx = 0;
                     if (emb_idx > 3) emb_idx = 3;
                     g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                 } else {
-                    // Cohesive calcified ash mantle
+                    // Ash accumulation: inner bed = dark charcoal, outer rim = chalky powder
+                    // More burnt material = higher ash bed = lighter top surface
+                    float ash_depth = g_ash_bed.height / 1.4f; // 0=thin, 1=full
+
+                    // Base index driven by radial zone:
+                    // - Core: dark charcoal (hot, dense)
+                    // - Mid: medium warm ash
+                    // - Rim: pale chalky powder
+                    float zone = r_norm_bed * 0.6f + h_factor * 0.25f + surface_noise * 0.15f;
+                    zone = fminf(1.0f, zone + ash_depth * 0.2f); // deeper = slightly lighter overall
+
                     int ash_idx;
-                    if (r_core < 1.8f && core_heat > 0.35f) {
-                        ash_idx = (int)(s_val * 1.6f);
+                    if (zone < 0.22f) {
+                        // Inner core — hot charcoal, possibly with ember glow
+                        ash_idx = (int)(s_val * 1.2f);
+                        if (ash_idx < 0) ash_idx = 0;
+                        if (ash_idx > 1) ash_idx = 1;
+                        // Add warm orange cast near center when hot
+                        if (core_heat > 0.3f && ash_idx == 1) {
+                            // Blend toward charred-brown instead of cool grey
+                            g_shade_buf[y][x] = (RGB){
+                                (uint8_t)fminf(255, 58 + (int)(core_heat * 55)),
+                                (uint8_t)(50 + (int)(core_heat * 20)),
+                                (uint8_t)(28 + (int)(core_heat * 5))
+                            };
+                            goto ash_done;
+                        }
+                    } else if (zone < 0.48f) {
+                        ash_idx = (int)(s_val * 1.8f + 0.5f);
                         if (ash_idx < 1) ash_idx = 1;
                         if (ash_idx > 2) ash_idx = 2;
-                    } else if (r_core < 3.8f) {
-                        ash_idx = (int)(s_val * 2.2f);
+                    } else if (zone < 0.72f) {
+                        ash_idx = (int)(s_val * 2.0f + 1.0f);
                         if (ash_idx < 2) ash_idx = 2;
                         if (ash_idx > 3) ash_idx = 3;
                     } else {
-                        ash_idx = (int)(s_val * 2.6f);
-                        if (ash_idx < 2) ash_idx = 2;
+                        // Outer rim and top — pale chalky ash deposit
+                        ash_idx = (int)(s_val * 2.2f + 1.5f);
+                        if (ash_idx < 3) ash_idx = 3;
                         if (ash_idx > 4) ash_idx = 4;
                     }
                     g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                    ash_done:;
                 }
             }
         }
@@ -1635,13 +1757,18 @@ static void present_frame(void) {
         prev_bg_transp = true;
     }
 
-    const char *stage_name = "1/7: Gravetos e Ignição";
-    if (g_sim_time > 200.0f) stage_name = "7/7: Cinzas Frias";
-    else if (g_sim_time > 155.0f) stage_name = "6/7: Leito de Brasas";
-    else if (g_sim_time > 125.0f) stage_name = "5/7: Colapso por Gravidade";
-    else if (g_sim_time > 85.0f) stage_name = "4/7: Madeira em Cinza";
-    else if (g_sim_time > 35.0f) stage_name = "3/7: Fogueira Roaring";
-    else if (g_sim_time > 12.0f) stage_name = "2/7: Chamas nas Toras";
+    int total_sec = (int)g_sim_time;
+    int hrs = total_sec / 3600;
+    int mins = (total_sec % 3600) / 60;
+    int secs = total_sec % 60;
+
+    const char *stage_name = "1/7: Gravetos e Secagem";
+    if (g_sim_time > 2700.0f) stage_name = "7/7: Cinzas e Resfriamento";
+    else if (g_sim_time > 2100.0f) stage_name = "6/7: Leito de Brasas";
+    else if (g_sim_time > 1600.0f) stage_name = "5/7: Fratura Estrutural e Colapso";
+    else if (g_sim_time > 1100.0f) stage_name = "4/7: Incandescência e Deformação";
+    else if (g_sim_time > 360.0f) stage_name = "3/7: Fogueira Roaring";
+    else if (g_sim_time > 120.0f) stage_name = "2/7: Ignição e Pirólise";
 
     const char *mode_name = "Fogueira Quadrada";
     if (g_stack_mode == 1) mode_name = "Tenda Cônica";
@@ -1651,9 +1778,21 @@ static void present_frame(void) {
     if (yaw_deg < 0) yaw_deg += 360;
     int pitch_deg = (int)roundf(g_cam_pitch * 180.0f / (float)M_PI);
 
-    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-        "\033[1;33m[3D Bonfire]\033[0m %4.0fs | Madeira: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Cam: %d°/%d°%s | [m] Modo | [Setas/WASD] Girar | [t] Turntable | [c] Colapsar | [q] Sair ",
-        g_sim_time, mode_name, stage_name, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
+    float avg_moisture = 0.0f;
+    float max_sag = 0.0f;
+    for (int i = 0; i < g_num_logs; i++) {
+        if (g_logs[i].sag_amount > max_sag) max_sag = g_logs[i].sag_amount;
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            avg_moisture += g_logs[i].segments[s].moisture;
+        }
+    }
+    avg_moisture = (avg_moisture / (float)(g_num_logs * NUM_LOG_SEGS)) * 100.0f;
+
+    if (g_show_hud) {
+        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Umid: %.0f%% | Sag: %.2f | Cam: %d°/%d°%s | [f] Modo [+/-] Vel [m] Pilha [c] Colapsar [q] Sair ",
+            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name, avg_moisture, max_sag, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
+    }
 
     if (buf_len > 0) {
         safe_write(STDOUT_FILENO, buf, buf_len);
@@ -1690,6 +1829,11 @@ static void handle_input(void) {
         } else if (ch == 's' || ch == 'S' || ch == 'j') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+        } else if (ch == 'f' || ch == 'F') {
+            g_realtime_mode = !g_realtime_mode;
+            g_time_scale = g_realtime_mode ? 1.0f : 30.0f;
+        } else if (ch == 'i' || ch == 'I') {
+            g_show_hud = !g_show_hud;
         } else if (ch == 'm' || ch == 'M') {
             g_stack_mode = (g_stack_mode + 1) % 3;
             init_scene();
@@ -1708,16 +1852,31 @@ static void handle_input(void) {
         } else if (ch == ' ') {
             g_paused = !g_paused;
         } else if (ch == '+' || ch == '=') {
-            g_time_scale *= 1.4f;
-            if (g_time_scale > 10.0f) g_time_scale = 10.0f;
+            g_time_scale += (g_time_scale < 5.0f) ? 1.0f : 5.0f;
+            if (g_time_scale > 60.0f) g_time_scale = 60.0f;
+            g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
         } else if (ch == '-' || ch == '_') {
-            g_time_scale /= 1.4f;
+            g_time_scale -= (g_time_scale <= 5.0f) ? 1.0f : 5.0f;
             if (g_time_scale < 0.2f) g_time_scale = 0.2f;
+            g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
         }
     }
 }
 
 int main(int argc, char **argv) {
+    for (int i = 1; i < argc; i++) {
+        if (strcmp(argv[i], "--realtime") == 0) {
+            g_realtime_mode = true;
+            g_time_scale = 1.0f;
+        } else if (strcmp(argv[i], "--fast") == 0) {
+            g_realtime_mode = false;
+            g_time_scale = 30.0f;
+        } else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
+            g_time_scale = (float)atof(argv[++i]);
+            g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
+        }
+    }
+
     if (argc > 2 && strcmp(argv[1], "--snapshot") == 0) {
         g_pixel_w = 120;
         g_pixel_h = 70;
@@ -1726,6 +1885,7 @@ int main(int argc, char **argv) {
         float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
         if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
+        g_time_scale = 30.0f; // Fast advance for headless snapshot rendering
         while (g_sim_time < target_sim) {
             update_simulation();
         }
