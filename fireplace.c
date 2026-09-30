@@ -101,7 +101,8 @@ static const WoodSpecies WOOD_SPECIES[4] = {
     }
 };
 
-static int g_wood_type = -1; // -1: pick randomly on init_scene
+static int g_wood_type = 0;
+static bool g_wood_type_forced = false;
 #define PALETTE_WOOD (WOOD_SPECIES[(g_wood_type >= 0 && g_wood_type < 4) ? g_wood_type : 0].palette_wood)
 #define PALETTE_ENDCAP (WOOD_SPECIES[(g_wood_type >= 0 && g_wood_type < 4) ? g_wood_type : 0].palette_endcap)
 
@@ -216,6 +217,8 @@ typedef struct {
     float break_t;                     // Fracture split ratio along the log [0.25..0.75]
     Vec3 break_p1, break_p1_orig, break_p1_target; // Piece 1 broken tip
     Vec3 break_p2, break_p2_orig, break_p2_target; // Piece 2 broken tip
+    Vec3 break_v1, break_v2;           // Ragdoll velocities of fractured log pieces
+    int break_bounces1, break_bounces2;// Ground impact bounces for each piece
     bool is_falling;                   // Dynamic ragdoll drop state
     Vec3 rest_p1, rest_p2;             // Target settled resting endpoints
     float fall_vy;                     // Vertical velocity (gravity/bounce)
@@ -476,6 +479,10 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->fall_rot_vy = 0.0f;
     c->fall_bounces = 0;
     c->fall_timer = 0.0f;
+    c->break_v1 = (Vec3){0.0f, 0.0f, 0.0f};
+    c->break_v2 = (Vec3){0.0f, 0.0f, 0.0f};
+    c->break_bounces1 = 0;
+    c->break_bounces2 = 0;
     Vec3 mid = vec3_scale(vec3_add(p1, p2), 0.5f);
     c->break_p1 = mid;
     c->break_p1_orig = mid;
@@ -831,7 +838,7 @@ static void init_scene(void) {
     g_collapse_progress = 0.0f;
     g_force_collapse = false;
 
-    if (g_wood_type < 0 || g_wood_type >= 4) {
+    if (!g_wood_type_forced) {
         g_wood_type = rand_range(0, 3);
     }
 
@@ -1566,6 +1573,8 @@ static void update_simulation(void) {
                 g_logs[i].break_p1_orig = break_orig;
                 g_logs[i].break_p2 = break_orig;
                 g_logs[i].break_p2_orig = break_orig;
+                g_logs[i].break_bounces1 = 0;
+                g_logs[i].break_bounces2 = 0;
 
                 // 2. Lateral kick vector perpendicular to log axis in XZ plane
                 Vec3 lat_kick = (Vec3){ -g_logs[i].dir.z, 0.0f, g_logs[i].dir.x };
@@ -1586,6 +1595,17 @@ static void update_simulation(void) {
                     break_orig.x - lat_kick.x * kick_mag2 * kick_dir + (rand_f() - 0.5f) * 0.5f,
                     p2_ground_y,
                     break_orig.z - lat_kick.z * kick_mag2 * kick_dir + (rand_f() - 0.5f) * 0.5f
+                };
+
+                g_logs[i].break_v1 = (Vec3){
+                    lat_kick.x * kick_mag1 * kick_dir * 1.6f + (rand_f() - 0.5f) * 0.8f,
+                    rand_f() * 1.6f + 0.4f,
+                    lat_kick.z * kick_mag1 * kick_dir * 1.6f + (rand_f() - 0.5f) * 0.8f
+                };
+                g_logs[i].break_v2 = (Vec3){
+                    -lat_kick.x * kick_mag2 * kick_dir * 1.6f + (rand_f() - 0.5f) * 0.8f,
+                    rand_f() * 1.6f + 0.4f,
+                    -lat_kick.z * kick_mag2 * kick_dir * 1.6f + (rand_f() - 0.5f) * 0.8f
                 };
 
                 // Asymmetric tilt & shift on the outer ends upon snapping
@@ -1689,20 +1709,51 @@ static void update_simulation(void) {
             }
 
             if (g_logs[i].fractured) {
-                if (g_logs[i].fracture_prog < 1.0f) {
-                    g_logs[i].fracture_prog += 0.016f * step_dt * 40.0f;
-                    if (g_logs[i].fracture_prog > 1.0f) g_logs[i].fracture_prog = 1.0f;
+                // Ragdoll physics on fracture piece 1
+                g_logs[i].break_v1.y -= 22.0f * step_dt;
+                g_logs[i].break_p1.x += g_logs[i].break_v1.x * step_dt;
+                g_logs[i].break_p1.y += g_logs[i].break_v1.y * step_dt;
+                g_logs[i].break_p1.z += g_logs[i].break_v1.z * step_dt;
+                g_logs[i].break_v1.x *= 0.94f;
+                g_logs[i].break_v1.z *= 0.94f;
+
+                float ground1 = -4.2f + g_logs[i].radius * 0.85f;
+                if (g_logs[i].break_p1.y <= ground1) {
+                    g_logs[i].break_p1.y = ground1;
+                    if (g_logs[i].break_bounces1 < 2 && fabsf(g_logs[i].break_v1.y) > 1.2f) {
+                        g_logs[i].break_v1.y = -g_logs[i].break_v1.y * 0.28f;
+                        g_logs[i].break_bounces1++;
+                        for (int sp = 0; sp < 6; sp++) {
+                            Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.0f, rand_f() * 2.5f + 1.0f, (rand_f() - 0.5f) * 2.0f};
+                            spawn_spark_3d(g_logs[i].break_p1, sp_v, rand_range(15, 35), PALETTE_EMBERS[rand_range(2, 4)]);
+                        }
+                    } else {
+                        g_logs[i].break_v1 = (Vec3){0, 0, 0};
+                    }
                 }
-                float fp = g_logs[i].fracture_prog;
-                float s_fp = fp * fp * (3.0f - 2.0f * fp);
 
-                g_logs[i].break_p1.x = g_logs[i].break_p1_orig.x * (1.0f - s_fp) + g_logs[i].break_p1_target.x * s_fp;
-                g_logs[i].break_p1.y = g_logs[i].break_p1_orig.y * (1.0f - s_fp) + g_logs[i].break_p1_target.y * s_fp;
-                g_logs[i].break_p1.z = g_logs[i].break_p1_orig.z * (1.0f - s_fp) + g_logs[i].break_p1_target.z * s_fp;
+                // Ragdoll physics on fracture piece 2
+                g_logs[i].break_v2.y -= 22.0f * step_dt;
+                g_logs[i].break_p2.x += g_logs[i].break_v2.x * step_dt;
+                g_logs[i].break_p2.y += g_logs[i].break_v2.y * step_dt;
+                g_logs[i].break_p2.z += g_logs[i].break_v2.z * step_dt;
+                g_logs[i].break_v2.x *= 0.94f;
+                g_logs[i].break_v2.z *= 0.94f;
 
-                g_logs[i].break_p2.x = g_logs[i].break_p2_orig.x * (1.0f - s_fp) + g_logs[i].break_p2_target.x * s_fp;
-                g_logs[i].break_p2.y = g_logs[i].break_p2_orig.y * (1.0f - s_fp) + g_logs[i].break_p2_target.y * s_fp;
-                g_logs[i].break_p2.z = g_logs[i].break_p2_orig.z * (1.0f - s_fp) + g_logs[i].break_p2_target.z * s_fp;
+                float ground2 = -4.2f + g_logs[i].radius * 0.85f;
+                if (g_logs[i].break_p2.y <= ground2) {
+                    g_logs[i].break_p2.y = ground2;
+                    if (g_logs[i].break_bounces2 < 2 && fabsf(g_logs[i].break_v2.y) > 1.2f) {
+                        g_logs[i].break_v2.y = -g_logs[i].break_v2.y * 0.28f;
+                        g_logs[i].break_bounces2++;
+                        for (int sp = 0; sp < 6; sp++) {
+                            Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.0f, rand_f() * 2.5f + 1.0f, (rand_f() - 0.5f) * 2.0f};
+                            spawn_spark_3d(g_logs[i].break_p2, sp_v, rand_range(15, 35), PALETTE_EMBERS[rand_range(2, 4)]);
+                        }
+                    } else {
+                        g_logs[i].break_v2 = (Vec3){0, 0, 0};
+                    }
+                }
             }
 
             recompute_cylinder_axes(&g_logs[i]);
@@ -2715,6 +2766,8 @@ static void handle_input(void) {
 }
 
 int main(int argc, char **argv) {
+    g_rng ^= (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16) ^ 0x9e3779b9;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
             print_bonfire_history();
@@ -2724,6 +2777,7 @@ int main(int argc, char **argv) {
             g_time_scale = 30.0f;
         } else if ((strcmp(argv[i], "--wood") == 0 || strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--madeira") == 0) && i + 1 < argc) {
             const char *w = argv[++i];
+            g_wood_type_forced = true;
             if (strcasecmp(w, "carvalho") == 0 || strcasecmp(w, "oak") == 0) g_wood_type = 0;
             else if (strcasecmp(w, "pinho") == 0 || strcasecmp(w, "pine") == 0) g_wood_type = 1;
             else if (strcasecmp(w, "betula") == 0 || strcasecmp(w, "birch") == 0) g_wood_type = 2;
