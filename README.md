@@ -1,57 +1,62 @@
 # fireplace-experiment
 
-Real-time physical bonfire simulation rendered as 2D pixel art over 3D geometric models in the terminal.
+A real-time physical bonfire Pomodoro timer rendered as 3D pixel art in the terminal.
 
-Uses a per-object pixel art shader pipeline with object-space snapping to eliminate pixel creep, stepped cel-shading, 1-pixel discontinuity outlines, and Unicode half-block characters (`▀`) for square pixel aspect ratio at 60 FPS with terminal transparency support.
+Focus while the campfire burns. Each session ignites kindling, transitions into a roaring teepee fire, snaps and settles into glowing ember coals, and slowly extinguishes when your focus time ends. Completed sessions are logged to keep track of your focus history.
 
-![3D Pixel Art Bonfire Combustion and Natural Hearth Stages](docs/media/natural_stone_segmented_stages.png)
+![Campfire Turntable](docs/media/fireplace_turntable.gif)
 
-## Key Techniques
+## How It Works
 
-- **Natural Interlocking Stone Ring (`Stone3D`)**: 16 anisotropic fieldstones modeled as oriented ellipsoids with local tangent, vertical, and radial frames. Features flattened heights, irregular spacing, and interlocking perimeter contact forming an authentic continuous hearth wall.
-- **Irregular Hand-Cut Firewood Stacks**: Randomized variations in log diameter ($R \in [0.92, 1.38]$), asymmetric lengths, and slight angular tilts across all 3 stacking modes (Log Cabin, Teepee, and Pyramid).
-- **Central Core Draft Combustion ($\eta(r)$)**: Simulates natural chimney convection. Flames and intense combustion are concentrated in the center core ($r < 3.2$), while outer log ends stick out intact with raw oak bark and ambient convective cooling.
-- **Asynchronous, Segment-Driven Collapse Kinematics**: Structural contact graph where logs collapse individually when their specific support points and central segments lose structural mass, rather than collapsing simultaneously.
-- **Piece-by-Piece Heterogeneous Lifecycle**: Conservative 1D thermal diffusion along wood grain prevents instantaneous flashover. Segments transition independently: Raw Oak $\to$ Scorched Soot $\to$ Alligator Charred $\to$ Calcified White Ash $\to$ Disintegration.
-- **3D Hearth Ash Bed (`AshBed3D`)**: Analytical 3D dome mound that grows dynamically inside the stone ring as wood burns, with glowing cellular fissure veins peeking through.
-- **Gravity-Settled Wood Ash Mantle**: Ash accumulates naturally on upward-facing log surfaces ($N_y > 0$), while vertical flanks and undersides retain charred carbon crusts.
-- **3D Camera Orbit & Turntable**: Real-time yaw and pitch camera orbit with arbitrary view matrix raycasting from any angle.
-- **ANSI Half-Block Output**: Encodes two vertical pixels per character cell (`\033[38;2;...m\033[48;2;...m▀`) with full native terminal background transparency.
+- **Pomodoro Cycle**: By default, a session runs for 50 minutes (standard natural firewood burn). You can set custom durations like `--time 25` for classic Pomodoro sessions.
+- **Dynamic Physical Combustion**: Logs undergo 1D thermal diffusion along the wood grain, dry out moisture, char, fracture at weakened stress points, and fall with ragdoll gravity into the coal bed.
+- **Randomized Wood Species**: Randomizes between Carvalho (Oak), Pinho (Pine), Bétula (Birch), and Cerejeira (Cherry), each with unique palettes, crackle frequency, and burn properties.
+- **Focus History**: Finished sessions are automatically logged to `~/.bonfire_history.json`.
+- **ANSI Half-Block Pixel Art**: 24-bit TrueColor characters (`▀`) rendered at 60 FPS with native terminal background transparency.
 
-## Building & Running
+## Usage
 
-### C Engine (Recommended)
-
-Requires GCC or Clang with POSIX terminal support:
+### Quick Start
 
 ```bash
 make
 ./fireplace
 ```
 
-### Python Prototype
-
-Requires Python 3.8+:
+### CLI Options
 
 ```bash
-python3 bonfire.py
+# Start a 25-minute Pomodoro session
+./fireplace --time 25
+
+# Specify a wood species (carvalho, pinho, betula, cerejeira)
+./fireplace --wood pinho --time 45
+
+# View past completed focus sessions
+./fireplace --history
+
+# Fast preview mode (30x speed)
+./fireplace --fast
 ```
 
 ## Controls
 
 | Key | Action |
 | --- | --- |
-| `m` | Cycle wood stacking mode (Log Cabin / Teepee / Pyramid) |
-| `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera left / right (yaw) |
-| `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera up / down (pitch) |
-| `t` | Toggle auto-turntable 360° rotation |
-| `0` or `z` | Reset camera angle to default |
-| `r` | Rekindle / restart bonfire lifecycle |
-| `c` | Trigger immediate structural log collapse |
-| `+` / `-` | Increase / decrease simulation speed |
-| `Space` | Pause / resume simulation |
-| `q` | Quit and restore terminal |
+| `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
+| `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
+| `Space` or `g` or `t` | Toggle automatic 360° turntable rotation |
+| `f` | Stoke fire / drop new firewood with ragdoll physics |
+| `r` | Rekindle / restart bonfire session |
+| `q` | Quit session |
+
+## Features & Simulation Details
+
+- **3D Stone Hearth**: 16 ellipsoidal fieldstones with perimeter contact forming a natural ring.
+- **Ragdoll Wood Physics**: Burning logs snap unevenly when central mass is exhausted and drop onto the hearth floor with physical impulse and bounce restitution.
+- **Smart Stoking (`f`)**: Accepts new firewood into natural open gaps in the teepee cone with fire capacity limits.
+- **Turntable & Snapshot Exporter**: Headless rendering to PPM/GIF for captures (`--snapshot` and `--turntable`).
 
 ## Documentation
 
-See [docs/architecture.md](docs/architecture.md) for detailed notes on the 3D pixel art shader math, combustion stages, and experiment log.
+See [docs/architecture.md](docs/architecture.md) for technical notes on the raycast shader, combustion equations, and geometry pipeline.
