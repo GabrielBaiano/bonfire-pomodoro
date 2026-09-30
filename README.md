@@ -29,6 +29,9 @@ make
 # Start a 25-minute Pomodoro session
 ./fireplace --time 25
 
+# Dark Souls Coiled Sword Bonfire mode
+./fireplace --souls --time 25
+
 # Specify a wood species (carvalho, pinho, betula, cerejeira)
 ./fireplace --wood pinho --time 45
 
@@ -39,6 +42,8 @@ make
 ./fireplace --fast
 ```
 
+![Dark Souls Bonfire](docs/media/dark_souls_bonfire.gif)
+
 ## Controls
 
 | Key | Action |
@@ -46,7 +51,8 @@ make
 | `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
 | `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
 | `Space` or `g` or `t` | Toggle automatic 360° turntable rotation |
-| `f` | Stoke fire / drop new firewood with ragdoll physics |
+| `m` | Switch mode (Standard Fireplace ↔ Dark Souls Coiled Sword) |
+| `k` / `f` | Stoke fire (wood in campfire / kindle surge in Dark Souls) |
 | `r` | Rekindle / restart bonfire session |
 | `q` | Quit session |
 

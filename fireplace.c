@@ -182,28 +182,33 @@ static const RGB PALETTE_SOOT_PUFF[] = {
     {46, 42, 42}      // 2: Ash puff
 };
 
+// Dark Souls Coiled Sword & Burned Bronze/Iron Alloy Palette
+// Aged forged bronze with copper-burnt undertones, reddish-orange heat patina, and fire sheen
 static const RGB PALETTE_IRON[] = {
-    {22, 20, 19},     // 0: Deep forged shadow
-    {38, 35, 33},     // 1: Dark weathered iron
-    {62, 58, 55},     // 2: Mid forged steel
-    {95, 90, 85},     // 3: Highlighted iron edge
-    {155, 148, 140}   // 4: Specular gleam
+    {38, 20, 14},     // 0: Deep burnt copper/bronze shadow
+    {78, 40, 24},     // 1: Dark oxidized bronze
+    {138, 72, 36},    // 2: Warm burnt reddish-bronze
+    {196, 114, 52},   // 3: Highlighted fire-bronze edge
+    {245, 168, 88}    // 4: Warm copper-golden specular gleam
 };
 
+// Weathered Pale Bone Palette (Ancient calcified human remains)
 static const RGB PALETTE_BONE[] = {
-    {70, 65, 55},     // 0: Scorched bone
-    {110, 102, 90},   // 1: Charred calcified bone
-    {155, 148, 135},  // 2: Weathered bone
-    {195, 188, 175},  // 3: Light bleached bone
-    {230, 224, 212}   // 4: Highlight bone
+    {28, 22, 18},     // 0: Deep black eye-socket void & nasal cavity
+    {95, 84, 72},     // 1: Charred crevice & shadow
+    {168, 156, 140},  // 2: Weathered ancient bone
+    {218, 210, 194},  // 3: Bleached bone ivory
+    {252, 248, 238}   // 4: Chalky bone highlight
 };
 
 typedef struct {
     float x, y, z;
 } Vec3;
 
-#define NUM_SWORD_BLADE_SEGS 20
+#define NUM_SWORD_BLADE_SEGS 26
 #define OBJ_SWORD 800
+#define MAX_BONES 48
+#define OBJ_BONE_BASE 900
 
 typedef struct {
     Vec3 p1, p2;
@@ -217,11 +222,31 @@ typedef struct {
     Vec3 root_pos;
     Vec3 axis;
     Vec3 guard_pos;
+    Vec3 guard_block_p1, guard_block_p2;
     Vec3 guard_p1, guard_p2;
     Vec3 quillon_p1, quillon_p2;
     Vec3 pommel_pos;
+    Vec3 pommel_tip;
     SwordBladeSegment blade_segs[NUM_SWORD_BLADE_SEGS];
 } Sword3D;
+
+typedef struct {
+    int obj_id;
+    Vec3 p1, p2;
+    float radius_shaft;
+    float radius_joint;
+    Vec3 dir;
+    float char_amount;
+    float heat;
+    bool is_skull;
+    Vec3 skull_pos;
+    float skull_radius;
+    Vec3 eye_left;
+    Vec3 eye_right;
+    float eye_radius;
+    Vec3 jaw_pos;
+    float jaw_radius;
+} Bone3D;
 
 typedef struct {
     float temp;            // Thermal state [0.0 = 20C ambient, 1.0 = 900C peak]
@@ -378,9 +403,11 @@ static SmokeParticle g_smoke[MAX_SMOKE];
 static Cylinder3D g_logs[MAX_LOGS];
 static int g_num_logs = 5;
 
-// Dark Souls Coiled Sword (Espada Espiral)
+// Dark Souls Coiled Sword (Espada Espiral) & Bone Pile
 static bool g_is_dark_souls = false;
 static Sword3D g_sword;
+static Bone3D g_bones[MAX_BONES];
+static int g_num_bones = 0;
 
 // 3D Kindling Twigs & Dry Leaves (Gravetos e Folhas)
 static Twig3D g_twigs[MAX_TWIGS];
@@ -859,14 +886,79 @@ static void build_stack_teepee(void) {
     }
 }
 
-static void build_dark_souls_scene(void) {
-    build_stone_ring();
+static void init_bone(Bone3D *b, int id, Vec3 p1, Vec3 p2, float r_shaft, float r_joint, float char_amt, float heat) {
+    b->obj_id = id;
+    b->p1 = p1;
+    b->p2 = p2;
+    b->radius_shaft = r_shaft;
+    b->radius_joint = r_joint;
+    Vec3 axis = vec3_sub(p2, p1);
+    float len = vec3_len(axis);
+    b->dir = (len > 1e-4f) ? vec3_scale(axis, 1.0f / len) : (Vec3){0.0f, 1.0f, 0.0f};
+    b->char_amount = char_amt;
+    b->heat = heat;
+    b->is_skull = false;
+    b->skull_pos = (Vec3){0.0f, 0.0f, 0.0f};
+    b->skull_radius = 0.0f;
+    b->eye_left = (Vec3){0.0f, 0.0f, 0.0f};
+    b->eye_right = (Vec3){0.0f, 0.0f, 0.0f};
+    b->eye_radius = 0.0f;
+    b->jaw_pos = (Vec3){0.0f, 0.0f, 0.0f};
+    b->jaw_radius = 0.0f;
+}
 
-    // 1. Coiled Sword (Espada Espiral)
+static void init_skull(Bone3D *b, int id, Vec3 pos, float radius, float yaw, float pitch, float char_amt, float heat) {
+    b->obj_id = id;
+    b->p1 = pos;
+    b->p2 = pos;
+    b->radius_shaft = 0.0f;
+    b->radius_joint = 0.0f;
+    b->char_amount = char_amt;
+    b->heat = heat;
+    b->is_skull = true;
+    b->skull_pos = pos;
+    b->skull_radius = radius;
+
+    // Face forward towards camera (-Z in world space) with subtle rotation
+    Vec3 fwd = vec3_norm((Vec3){ sinf(yaw) * cosf(pitch), sinf(pitch), -cosf(yaw) * cosf(pitch) });
+    Vec3 right = vec3_norm(vec3_cross(fwd, (Vec3){0.0f, 1.0f, 0.0f}));
+    Vec3 up = vec3_cross(right, fwd);
+    b->dir = fwd;
+
+    // Carve recessed dark eye sockets on the frontal bone facing camera
+    float eye_spacing = radius * 0.35f;
+    float eye_forward = radius * 0.82f;
+    float eye_up = radius * 0.10f;
+
+    b->eye_radius = radius * 0.24f;
+    b->eye_left = vec3_add(pos, vec3_add(vec3_scale(fwd, eye_forward),
+                                 vec3_add(vec3_scale(right, -eye_spacing), vec3_scale(up, eye_up))));
+    b->eye_right = vec3_add(pos, vec3_add(vec3_scale(fwd, eye_forward),
+                                  vec3_add(vec3_scale(right, eye_spacing), vec3_scale(up, eye_up))));
+
+    // Maxilla and jaw positioned slightly forward and lower
+    b->jaw_pos = vec3_add(pos, vec3_add(vec3_scale(fwd, radius * 0.32f), vec3_scale(up, -radius * 0.45f)));
+    b->jaw_radius = radius * 0.58f;
+}
+
+static void build_dark_souls_scene(void) {
+    g_num_stones = 0; // NO stone ring in Dark Souls mode!
+    g_num_twigs = 0;
+    g_num_leaves = 0;
+
+    // 1. Natural Conical Ash Mound (Base de cinzas e poeira de ossos calcificados)
+    g_ash_bed.center = (Vec3){0.0f, -4.20f, 0.0f};
+    g_ash_bed.radius_xz = 4.1f;
+    g_ash_bed.height = 1.62f; // Summit at y = -2.58f
+    g_ash_bed.heat = 1.0f;
+    g_ash_bed.volume = 0.92f;
+    g_burnt_mass = 0.95f;
+
+    // 2. Coiled Sword (Espada Espiral fincada no monte)
     g_sword.obj_id = OBJ_SWORD;
     g_sword.active = true;
-    g_sword.root_pos = (Vec3){0.08f, -4.20f, -0.05f};
-    g_sword.axis = vec3_norm((Vec3){0.26f, 0.95f, -0.14f});
+    g_sword.root_pos = (Vec3){0.04f, -2.85f, -0.04f}; // Embedded deep into ash core
+    g_sword.axis = vec3_norm((Vec3){0.14f, 0.98f, -0.07f}); // Iconic slight Dark Souls tilt
 
     Vec3 u = g_sword.axis;
     Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
@@ -876,51 +968,126 @@ static void build_dark_souls_scene(void) {
     Vec3 prev_p = g_sword.root_pos;
     for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
         float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
-        float radius = 0.36f - 0.12f * (s / blade_len);
-        float phase = s * 2.4f + 0.35f;
-        float amp = 0.35f * (1.0f - 0.20f * (s / blade_len));
+        float radius = 0.44f - 0.12f * (s / blade_len);
+        float phase = s * 2.6f + 0.35f;
+        float amp = 0.38f * (1.0f - 0.15f * (s / blade_len));
         Vec3 spiral_offset = vec3_add(vec3_scale(w1, amp * sinf(phase)), vec3_scale(w2, amp * cosf(phase)));
         Vec3 curr_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), spiral_offset));
 
         g_sword.blade_segs[i].p1 = prev_p;
         g_sword.blade_segs[i].p2 = curr_p;
         g_sword.blade_segs[i].radius = radius;
-        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (3.8f - s) / 3.0f));
+        // Thermal incandescence climbs the coiled sword (intense ember gradient)
+        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (5.4f - s) / 4.4f));
         prev_p = curr_p;
     }
 
     g_sword.guard_pos = vec3_add(g_sword.root_pos, vec3_scale(u, blade_len));
-    g_sword.guard_p1 = vec3_sub(g_sword.guard_pos, vec3_scale(w1, 1.15f));
-    g_sword.guard_p2 = vec3_add(g_sword.guard_pos, vec3_scale(w1, 1.15f));
-    g_sword.quillon_p1 = vec3_add(g_sword.guard_p1, vec3_add(vec3_scale(u, -0.38f), vec3_scale(w1, -0.16f)));
-    g_sword.quillon_p2 = vec3_add(g_sword.guard_p2, vec3_add(vec3_scale(u, -0.38f), vec3_scale(w1, 0.16f)));
+    g_sword.guard_block_p1 = vec3_sub(g_sword.guard_pos, vec3_scale(u, 0.25f));
+    g_sword.guard_block_p2 = vec3_add(g_sword.guard_pos, vec3_scale(u, 0.25f));
 
-    g_sword.pommel_pos = vec3_add(g_sword.guard_pos, vec3_scale(u, 1.65f));
+    g_sword.guard_p1 = vec3_sub(g_sword.guard_pos, vec3_scale(w1, 1.40f));
+    g_sword.guard_p2 = vec3_add(g_sword.guard_pos, vec3_scale(w1, 1.40f));
 
-    // 2. Base logs & charred bones in circular mound
+    g_sword.quillon_p1 = vec3_add(g_sword.guard_p1, vec3_add(vec3_scale(u, -0.45f), vec3_scale(w1, -0.22f)));
+    g_sword.quillon_p2 = vec3_add(g_sword.guard_p2, vec3_add(vec3_scale(u, -0.45f), vec3_scale(w1, 0.22f)));
+
+    g_sword.pommel_pos = vec3_add(g_sword.guard_pos, vec3_scale(u, 1.45f));
+    g_sword.pommel_tip = vec3_add(g_sword.pommel_pos, vec3_scale(u, 0.45f));
+
+    // 3. Charred Bonfire Logs/Branches (Galhos carbonizados salientes)
     g_num_logs = 4;
+    // Iconic right-slanting charred branch jutting forward-right from reference photo
+    init_cylinder(&g_logs[0], 1, (Vec3){0.22f, -2.55f, -0.15f}, (Vec3){2.95f, -4.15f, -1.55f},
+                  (Vec3){0.22f, -2.55f, -0.15f}, (Vec3){2.95f, -4.15f, -1.55f}, 0.26f, 0.45f);
+    // Left-rear charred branch
+    init_cylinder(&g_logs[1], 2, (Vec3){-0.22f, -2.55f, 0.15f}, (Vec3){-2.65f, -4.10f, 1.45f},
+                  (Vec3){-0.22f, -2.55f, 0.15f}, (Vec3){-2.65f, -4.10f, 1.45f}, 0.23f, 0.45f);
+    // Right-rear branch
+    init_cylinder(&g_logs[2], 3, (Vec3){0.18f, -2.60f, 0.25f}, (Vec3){2.35f, -4.10f, 1.60f},
+                  (Vec3){0.18f, -2.60f, 0.25f}, (Vec3){2.35f, -4.10f, 1.60f}, 0.21f, 0.45f);
+    // Left-front branch
+    init_cylinder(&g_logs[3], 4, (Vec3){-0.28f, -2.60f, -0.22f}, (Vec3){-2.25f, -4.12f, -1.50f},
+                  (Vec3){-0.28f, -2.60f, -0.22f}, (Vec3){-2.25f, -4.12f, -1.50f}, 0.20f, 0.45f);
+
     for (int i = 0; i < g_num_logs; i++) {
-        float angle = (float)i * 2.0f * (float)M_PI / (float)g_num_logs + 0.35f;
-        float r_base = 2.5f;
-        float r_core = 0.55f;
-        Vec3 p1 = (Vec3){ r_base * cosf(angle), -4.10f, r_base * sinf(angle) };
-        Vec3 p2 = (Vec3){ r_core * cosf(angle + 2.2f), -3.65f, r_core * sinf(angle + 2.2f) };
-        init_cylinder(&g_logs[i], i + 1, p1, p2, p1, (Vec3){0.0f, -4.10f, 0.0f}, 0.70f, 0.45f);
+        g_logs[i].wood_health = 0.0f;
+        g_logs[i].charred = 1.0f;
+        g_logs[i].ash_amount = 0.45f;
+        g_logs[i].snapped = false;
+        g_logs[i].fractured = false;
+        g_logs[i].is_falling = false;
+        g_logs[i].collapse_cur = 1.0f;
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            g_logs[i].segments[s].burn_progress = 0.55f;
-            g_logs[i].segments[s].temp = 0.65f;
-            g_logs[i].segments[s].structural_mass = 0.60f;
+            g_logs[i].segments[s].burn_progress = 0.85f;
+            g_logs[i].segments[s].temp = (s < 2) ? 0.70f : 0.20f;
+            g_logs[i].segments[s].structural_mass = 0.85f;
             g_logs[i].segments[s].moisture = 0.0f;
-            g_logs[i].segments[s].glow_intensity = 0.70f;
+            g_logs[i].segments[s].glow_intensity = (s < 2) ? 0.80f : 0.0f;
         }
     }
 
-    // 3. Kindling bones / twigs
-    build_kindling();
-    for (int i = 0; i < g_num_twigs; i++) {
-        g_twigs[i].temp = 0.75f;
-        g_twigs[i].burn_progress = 0.45f;
-        g_twigs[i].moisture = 0.0f;
+    // 4. Detailed Bone Pile embedded in and resting prominently on Ash Mound
+    g_num_bones = 32;
+
+    // Skull 0: Prominent Humanoid Skull in the foreground-left, tilted slightly forward towards camera
+    init_skull(&g_bones[0], OBJ_BONE_BASE + 0, (Vec3){ -1.20f, -2.42f, -1.65f }, 0.68f, 0.08f, -0.08f, 0.15f, 0.25f);
+
+    // Skull 1: Central Skull nestled in the embers right at the sword entry
+    init_skull(&g_bones[1], OBJ_BONE_BASE + 1, (Vec3){ 0.35f, -2.44f, -1.05f }, 0.58f, -0.12f, 0.04f, 0.45f, 0.65f);
+
+    // Skull 2: Skull on the front-right slope of the ash mound near the charred branch
+    init_skull(&g_bones[2], OBJ_BONE_BASE + 2, (Vec3){ 1.55f, -2.52f, -1.25f }, 0.55f, -0.30f, -0.08f, 0.22f, 0.30f);
+
+    // Skull 3: Rear-left skull perched high on the ash mound
+    init_skull(&g_bones[3], OBJ_BONE_BASE + 3, (Vec3){ -0.75f, -2.32f, 0.95f }, 0.48f, 2.75f, 0.10f, 0.50f, 0.45f);
+
+    // Criss-crossing femurs, ribs, and limb bones forming the dense bonfire pile
+    struct { Vec3 p1, p2; float r_s, r_j, chr, ht; } bone_specs[28] = {
+        // Crossed femurs cradling skull 0 in the foreground
+        { {-1.95f, -2.85f, -1.85f}, {-0.55f, -2.45f, -1.35f}, 0.24f, 0.40f, 0.15f, 0.20f },
+        { {-0.75f, -2.35f, -1.95f}, {-1.85f, -2.90f, -1.25f}, 0.24f, 0.40f, 0.15f, 0.20f },
+
+        // Crossed femurs cradling skull 2 on the right slope
+        { { 1.95f, -2.85f, -1.45f}, { 0.85f, -2.45f, -0.95f}, 0.24f, 0.40f, 0.20f, 0.25f },
+        { { 1.15f, -2.35f, -1.55f}, { 2.10f, -2.90f, -0.85f}, 0.24f, 0.40f, 0.20f, 0.25f },
+
+        // Ribs arching out of the ash bed around the sword base
+        { {-0.65f, -2.25f, -0.55f}, { 0.65f, -2.25f, -0.60f}, 0.20f, 0.32f, 0.60f, 0.85f },
+        { {-0.85f, -2.28f, -0.25f}, { 0.85f, -2.28f, -0.20f}, 0.20f, 0.32f, 0.65f, 0.85f },
+        { {-0.70f, -2.25f,  0.35f}, { 0.70f, -2.25f,  0.40f}, 0.20f, 0.32f, 0.70f, 0.85f },
+
+        // Outer radiating long bones down the front mound slope
+        { {-0.45f, -2.40f, -1.25f}, {-1.75f, -3.45f, -2.35f}, 0.22f, 0.36f, 0.18f, 0.18f },
+        { { 0.45f, -2.40f, -1.15f}, { 1.65f, -3.45f, -2.25f}, 0.22f, 0.36f, 0.18f, 0.18f },
+        { {-0.30f, -2.55f, -1.60f}, { 0.35f, -2.80f, -2.10f}, 0.21f, 0.34f, 0.15f, 0.15f },
+        { {-1.45f, -3.25f, -1.85f}, {-0.25f, -3.60f, -2.55f}, 0.20f, 0.32f, 0.15f, 0.15f },
+        { { 0.25f, -3.60f, -2.55f}, { 1.45f, -3.25f, -1.85f}, 0.20f, 0.32f, 0.15f, 0.15f },
+        { { 2.10f, -3.35f, -0.45f}, { 2.95f, -3.80f,  0.35f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { {-2.10f, -3.35f, -0.45f}, {-2.95f, -3.80f,  0.35f}, 0.20f, 0.32f, 0.20f, 0.20f },
+
+        // Rear slope and summit bones
+        { {-1.25f, -2.35f,  0.75f}, { 0.15f, -2.15f,  1.10f}, 0.22f, 0.36f, 0.35f, 0.45f },
+        { { 1.25f, -2.35f,  0.65f}, {-0.15f, -2.15f,  1.05f}, 0.22f, 0.36f, 0.35f, 0.45f },
+        { {-0.35f, -2.30f,  0.85f}, {-1.85f, -3.35f,  1.55f}, 0.21f, 0.34f, 0.30f, 0.30f },
+        { { 0.35f, -2.30f,  0.85f}, { 1.85f, -3.35f,  1.55f}, 0.21f, 0.34f, 0.30f, 0.30f },
+        { {-1.65f, -3.45f,  1.15f}, {-2.45f, -3.80f,  1.95f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { { 1.65f, -3.45f,  1.15f}, { 2.45f, -3.80f,  1.95f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { {-0.65f, -3.65f,  2.15f}, { 0.65f, -3.65f,  2.25f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { {-2.25f, -3.65f, -0.65f}, {-2.85f, -3.82f,  0.55f}, 0.19f, 0.30f, 0.18f, 0.18f },
+        { { 2.25f, -3.65f, -0.65f}, { 2.85f, -3.82f,  0.55f}, 0.19f, 0.30f, 0.18f, 0.18f },
+        { {-0.95f, -3.05f, -1.45f}, { 0.05f, -3.15f, -1.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { { 0.95f, -3.05f, -1.35f}, {-0.05f, -3.15f, -1.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { {-0.55f, -2.65f, -0.95f}, { 0.55f, -2.65f, -0.90f}, 0.21f, 0.34f, 0.35f, 0.40f },
+        { {-1.15f, -2.75f,  0.45f}, {-0.25f, -3.05f,  0.85f}, 0.20f, 0.32f, 0.25f, 0.25f },
+        { { 1.15f, -2.75f,  0.45f}, { 0.25f, -3.05f,  0.85f}, 0.20f, 0.32f, 0.25f, 0.25f }
+    };
+
+    for (int i = 0; i < 28; i++) {
+        init_bone(&g_bones[4 + i], OBJ_BONE_BASE + 4 + i,
+                  bone_specs[i].p1, bone_specs[i].p2,
+                  bone_specs[i].r_s, bone_specs[i].r_j,
+                  bone_specs[i].chr, bone_specs[i].ht);
     }
 }
 
@@ -951,6 +1118,7 @@ static void init_scene(void) {
     if (g_is_dark_souls) {
         build_dark_souls_scene();
     } else {
+        g_num_bones = 0;
         build_stone_ring();
         build_kindling();
         build_stack_teepee();
@@ -1034,6 +1202,108 @@ static bool intersect_capsule(Vec3 p1, Vec3 p2, float radius, Vec3 ro, Vec3 rd, 
     return false;
 }
 
+static bool intersect_bone(const Bone3D *b, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm, float *out_char, float *out_heat) {
+    float best_t = 1e9f;
+    bool hit = false;
+    Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
+    float char_val = b->char_amount;
+
+    if (b->is_skull) {
+        float t;
+        Vec3 pt, norm;
+        if (intersect_capsule(b->skull_pos, vec3_add(b->skull_pos, (Vec3){0.0f, 0.12f, 0.0f}), b->skull_radius, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                hit = true;
+            }
+        }
+        if (b->jaw_radius > 0.01f) {
+            if (intersect_capsule(b->jaw_pos, vec3_add(b->jaw_pos, (Vec3){0.0f, 0.08f, 0.0f}), b->jaw_radius, ro, rd, &t, &pt, &norm)) {
+                if (t < best_t) {
+                    best_t = t;
+                    best_pt = pt;
+                    best_norm = norm;
+                    hit = true;
+                }
+            }
+        }
+        // Deep sunken eye sockets & nasal cavity on the frontal face
+        if (hit && b->skull_radius > 0.01f) {
+            Vec3 delta = vec3_sub(best_pt, b->skull_pos);
+            float pfwd = vec3_dot(delta, b->dir);
+            if (pfwd > b->skull_radius * 0.30f) {
+                Vec3 s_up = (Vec3){0.0f, 1.0f, 0.0f};
+                Vec3 s_right = vec3_norm(vec3_cross(b->dir, s_up));
+                Vec3 s_true_up = vec3_cross(s_right, b->dir);
+                float pright = vec3_dot(delta, s_right);
+                float pup = vec3_dot(delta, s_true_up);
+
+                // Left and right eye orbits
+                float dy_eye = pup - b->skull_radius * 0.08f;
+                float dx_l = pright - (-b->skull_radius * 0.36f);
+                float dx_r = pright - (b->skull_radius * 0.36f);
+                float eye_r_sq = (b->skull_radius * 0.28f) * (b->skull_radius * 0.28f);
+
+                // Nasal aperture
+                float dy_nose = pup - (-b->skull_radius * 0.16f);
+                float dx_nose = pright;
+                float nose_metric = dx_nose * dx_nose * 2.2f + dy_nose * dy_nose;
+                float nose_r_sq = (b->skull_radius * 0.18f) * (b->skull_radius * 0.18f);
+
+                if (dx_l * dx_l + dy_eye * dy_eye < eye_r_sq ||
+                    dx_r * dx_r + dy_eye * dy_eye < eye_r_sq ||
+                    nose_metric < nose_r_sq) {
+                    best_norm = vec3_scale(b->dir, -1.0f); // inward void
+                    char_val = 0.98f; // eye socket void shadow
+                }
+            }
+        }
+    } else {
+        float t;
+        Vec3 pt, norm;
+        if (intersect_capsule(b->p1, b->p2, b->radius_shaft, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                hit = true;
+            }
+        }
+        // Double condyle joints at p1
+        Vec3 side = vec3_norm(vec3_cross(b->dir, (Vec3){0.0f, 1.0f, 0.0f}));
+        Vec3 j1a = vec3_add(b->p1, vec3_scale(side, b->radius_joint * 0.50f));
+        Vec3 j1b = vec3_sub(b->p1, vec3_scale(side, b->radius_joint * 0.50f));
+        if (intersect_capsule(j1a, b->p1, b->radius_joint * 0.72f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; hit = true; }
+        }
+        if (intersect_capsule(j1b, b->p1, b->radius_joint * 0.72f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; hit = true; }
+        }
+
+        // Double condyle joints at p2
+        Vec3 j2a = vec3_add(b->p2, vec3_scale(side, b->radius_joint * 0.50f));
+        Vec3 j2b = vec3_sub(b->p2, vec3_scale(side, b->radius_joint * 0.50f));
+        if (intersect_capsule(j2a, b->p2, b->radius_joint * 0.72f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; hit = true; }
+        }
+        if (intersect_capsule(j2b, b->p2, b->radius_joint * 0.72f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; hit = true; }
+        }
+    }
+
+    if (hit) {
+        *out_t = best_t;
+        *out_pt = best_pt;
+        *out_norm = best_norm;
+        *out_char = char_val;
+        *out_heat = b->heat;
+        return true;
+    }
+    return false;
+}
+
 static bool intersect_sword(const Sword3D *sw, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm, float *out_heat, int *out_part) {
     if (!sw->active) return false;
     float best_t = 1e9f;
@@ -1058,47 +1328,29 @@ static bool intersect_sword(const Sword3D *sw, Vec3 ro, Vec3 rd, float *out_t, V
         }
     }
 
-    // 2. Crossguard and Quillons
+    // 2. Crossguard (Central hub block + Wide crossbar + Angled quillons)
     {
         float t;
         Vec3 pt, norm;
-        if (intersect_capsule(sw->guard_p1, sw->guard_p2, 0.20f, ro, rd, &t, &pt, &norm)) {
-            if (t < best_t) {
-                best_t = t;
-                best_pt = pt;
-                best_norm = norm;
-                best_heat = 0.0f;
-                best_part = 1;
-                hit = true;
-            }
+        if (intersect_capsule(sw->guard_block_p1, sw->guard_block_p2, 0.38f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; best_heat = 0.0f; best_part = 1; hit = true; }
         }
-        if (intersect_capsule(sw->guard_p1, sw->quillon_p1, 0.16f, ro, rd, &t, &pt, &norm)) {
-            if (t < best_t) {
-                best_t = t;
-                best_pt = pt;
-                best_norm = norm;
-                best_heat = 0.0f;
-                best_part = 1;
-                hit = true;
-            }
+        if (intersect_capsule(sw->guard_p1, sw->guard_p2, 0.28f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; best_heat = 0.0f; best_part = 1; hit = true; }
         }
-        if (intersect_capsule(sw->guard_p2, sw->quillon_p2, 0.16f, ro, rd, &t, &pt, &norm)) {
-            if (t < best_t) {
-                best_t = t;
-                best_pt = pt;
-                best_norm = norm;
-                best_heat = 0.0f;
-                best_part = 1;
-                hit = true;
-            }
+        if (intersect_capsule(sw->guard_p1, sw->quillon_p1, 0.22f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; best_heat = 0.0f; best_part = 1; hit = true; }
+        }
+        if (intersect_capsule(sw->guard_p2, sw->quillon_p2, 0.22f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) { best_t = t; best_pt = pt; best_norm = norm; best_heat = 0.0f; best_part = 1; hit = true; }
         }
     }
 
-    // 3. Grip / Hilt
+    // 3. 2-Handed Grip / Hilt
     {
         float t;
         Vec3 pt, norm;
-        if (intersect_capsule(sw->guard_pos, sw->pommel_pos, 0.16f, ro, rd, &t, &pt, &norm)) {
+        if (intersect_capsule(sw->guard_pos, sw->pommel_pos, 0.22f, ro, rd, &t, &pt, &norm)) {
             if (t < best_t) {
                 best_t = t;
                 best_pt = pt;
@@ -1110,12 +1362,11 @@ static bool intersect_sword(const Sword3D *sw, Vec3 ro, Vec3 rd, float *out_t, V
         }
     }
 
-    // 4. Pommel
+    // 4. Crown / Diamond Pommel
     {
         float t;
         Vec3 pt, norm;
-        Vec3 pommel_top = vec3_add(sw->pommel_pos, vec3_scale(sw->axis, 0.35f));
-        if (intersect_capsule(sw->pommel_pos, pommel_top, 0.28f, ro, rd, &t, &pt, &norm)) {
+        if (intersect_capsule(sw->pommel_pos, sw->pommel_tip, 0.38f, ro, rd, &t, &pt, &norm)) {
             if (t < best_t) {
                 best_t = t;
                 best_pt = pt;
@@ -1541,7 +1792,7 @@ static void update_simulation(void) {
 
     Vec3 kindle_pos = (Vec3){0.0f, -2.6f, 0.0f};
 
-    for (int step = 0; step < num_substeps; step++) {
+    if (!g_is_dark_souls) for (int step = 0; step < num_substeps; step++) {
         float cur_sim_t = g_sim_time - dt + (step + 1) * step_dt;
         float kindle_heat = 0.0f;
         if (cur_sim_t < 240.0f) {
@@ -1789,9 +2040,11 @@ static void update_simulation(void) {
         float burnt_mass = 1.0f - avg_mass;
         g_burnt_mass = burnt_mass;
 
-        float target_height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
-        float smooth_rate = 1.0f - expf(-step_dt * 0.8f);
-        g_ash_bed.height += (target_height - g_ash_bed.height) * smooth_rate;
+        if (!g_is_dark_souls) {
+            float target_height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
+            float smooth_rate = 1.0f - expf(-step_dt * 0.8f);
+            g_ash_bed.height += (target_height - g_ash_bed.height) * smooth_rate;
+        }
 
         if (active_burning_segs > 0) {
             g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.0005f * step_dt * 40.0f);
@@ -2053,34 +2306,44 @@ static void update_simulation(void) {
 
     if (g_is_dark_souls && g_sword.active) {
         // Sustain constant mystical bonfire flame activity
-        g_ash_bed.heat = fmaxf(0.85f, g_ash_bed.heat);
+        g_ash_bed.heat = 1.0f;
 
-        // Update blade heat
+        // Update blade heat along the twisted blade
+        float blade_len = 6.8f;
         for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
-            float s = 6.8f * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
-            g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (3.8f - s) / 3.0f)) * g_ash_bed.heat;
+            float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
+            g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (5.4f - s) / 4.4f)) * g_ash_bed.heat;
         }
 
-        // Swirling golden flame sparks rising along the coiled blade
-        if (rand_f() < 0.65f) {
-            float s = rand_f() * 3.8f;
-            Vec3 u = g_sword.axis;
-            Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
-            Vec3 w2 = vec3_cross(u, w1);
-            float phase = s * 2.4f + g_anim_time * 5.0f;
-            Vec3 offset = vec3_add(vec3_scale(w1, 0.45f * sinf(phase)), vec3_scale(w2, 0.45f * cosf(phase)));
-            Vec3 sp_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), offset));
-            Vec3 sp_v = (Vec3){
-                (rand_f() - 0.5f) * 0.7f + offset.x * 0.5f,
-                rand_f() * 2.8f + 1.8f,
-                (rand_f() - 0.5f) * 0.7f + offset.z * 0.5f
-            };
-            spawn_spark_3d(sp_p, sp_v, rand_range(25, 55), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+        // Swirling embers & sparks climbing up the coiled bronze sword blade
+        Vec3 u = g_sword.axis;
+        Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
+        Vec3 w2 = vec3_cross(u, w1);
+
+        for (int e = 0; e < 3; e++) {
+            if (rand_f() < 0.70f) {
+                float s = rand_f() * 6.2f;
+                float phase = s * 2.6f + g_anim_time * 6.0f + (float)e * 2.1f;
+                float spiral_r = 0.38f * (1.0f - 0.12f * (s / 6.2f));
+                Vec3 offset = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)), vec3_scale(w2, spiral_r * cosf(phase)));
+                Vec3 sp_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), offset));
+                Vec3 sp_v = (Vec3){
+                    (rand_f() - 0.5f) * 0.45f + offset.x * 0.5f,
+                    rand_f() * 2.8f + 1.8f,
+                    (rand_f() - 0.5f) * 0.45f + offset.z * 0.5f
+                };
+                RGB ember_c;
+                float c_choice = rand_f();
+                if (c_choice > 0.65f) ember_c = PALETTE_EMBERS[4]; // White-gold ember
+                else if (c_choice > 0.30f) ember_c = PALETTE_EMBERS[3]; // Bright yellow-orange fire spark
+                else ember_c = PALETTE_EMBERS[2]; // Deep fiery orange-red ember
+                spawn_spark_3d(sp_p, sp_v, rand_range(25, 65), ember_c);
+            }
         }
     }
 
     // Post-extinction thin delicate wispy smoke drifting from cool ash bed
-    if (g_sim_time >= 3000.0f && g_sim_time < 3350.0f) {
+    if (!g_is_dark_souls && g_sim_time >= 3000.0f && g_sim_time < 3350.0f) {
         if (rand_f() < 0.12f) {
             Vec3 ash_c = (Vec3){(rand_f() - 0.5f) * 1.5f, -4.1f, (rand_f() - 0.5f) * 1.5f};
             Vec3 smk_v = (Vec3){
@@ -2116,8 +2379,8 @@ static void update_simulation(void) {
     // -------------------------------------------------------------------------
     // STRICT FIRE PROJECTION: Heat originates strictly from burning wood & kindling
     // -------------------------------------------------------------------------
-    Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
-    float cam_dist = 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? -0.8f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 20.0f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2128,8 +2391,8 @@ static void update_simulation(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = 22.0f;
-    float world_h = 14.0f;
+    float world_w = g_is_dark_souls ? 14.5f : 22.0f;
+    float world_h = g_is_dark_souls ? 10.0f : 14.0f;
 
     // Reset next fire frame and depth buffer
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -2139,67 +2402,140 @@ static void update_simulation(void) {
         }
     }
 
-    // 1. Kindling flames emitted directly from twigs and leaves on the hearth floor!
-    float cur_kindle_heat = (g_sim_time < 240.0f) ? (g_sim_time < 60.0f ? 1.0f : fmaxf(0.0f, 1.0f - (g_sim_time - 60.0f) / 180.0f)) : 0.0f;
-    for (int tw = 0; tw < g_num_twigs; tw++) {
-        float tw_heat = (cur_kindle_heat > 0.05f) ? fmaxf(cur_kindle_heat * 0.85f, g_twigs[tw].temp) : (g_twigs[tw].active ? g_twigs[tw].temp : 0.0f);
-        if (tw_heat > 0.25f) {
-            Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
-            Vec3 rel_k = vec3_sub(mid_tw, cam_pos);
-            int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
-            int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
-            float kz = vec3_dot(rel_k, fwd);
-            float flame_z = kz - g_twigs[tw].radius * 0.9f;
-            float flame_h = tw_heat * 0.92f;
-
-            for (int dy = -2; dy <= 1; dy++) {
-                for (int dx = -2; dx <= 2; dx++) {
-                    int px = kx + dx;
-                    int py = ky + dy;
-                    if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
-                        float d = sqrtf((dx * 1.0f)*(dx * 1.0f) + (dy * 1.5f)*(dy * 1.5f));
-                        if (d < 2.5f) {
-                            float val = flame_h * (1.0f - d / 2.5f);
-                            g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], val);
-                            if (flame_z < g_fire_z[py][px]) g_fire_z[py][px] = flame_z;
+    if (g_is_dark_souls && g_sword.active) {
+        // Base mound glowing ember core - compact hot heart at sword entry
+        for (float r = 0.0f; r <= 0.95f; r += 0.22f) {
+            for (float a = 0.0f; a < 6.28f; a += 0.85f) {
+                Vec3 p_emb = (Vec3){ r * cosf(a) + 0.04f, -2.80f, r * sinf(a) - 0.04f };
+                Vec3 rel_k = vec3_sub(p_emb, cam_pos);
+                int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
+                int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
+                float kz = vec3_dot(rel_k, fwd);
+                float val = 0.96f * (1.0f - r / 1.15f);
+                for (int dy = -1; dy <= 1; dy++) {
+                    for (int dx = -1; dx <= 1; dx++) {
+                        int px = kx + dx, py = ky + dy;
+                        if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                            float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.5f);
+                            if (d < 1.8f) {
+                                float h = val * (1.0f - d / 1.8f);
+                                g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
+                                if (kz - 0.25f < g_fire_z[py][px]) g_fire_z[py][px] = kz - 0.25f;
+                            }
                         }
                     }
                 }
             }
         }
-    }
 
-    // 2. Heat anchored exclusively to burning wood segments inside the core draft!
-    for (int i = 0; i < g_num_logs; i++) {
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            float temp = g_logs[i].segments[s].temp;
-            float moisture = g_logs[i].segments[s].moisture;
-            if (temp > 0.30f && moisture <= 0.05f) {
-                Vec3 p = get_log_segment_pos(&g_logs[i], s);
+        // Helical wrapping flame ribbons climbing the coiled blade all the way to the crossguard
+        Vec3 u = g_sword.axis;
+        Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
+        Vec3 w2 = vec3_cross(u, w1);
+        float flame_reach = 6.4f; // reaches up to quillon & guard
 
-                float r_seg = sqrtf(p.x * p.x + p.z * p.z);
-                float r_norm = r_seg / 3.4f;
-                float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+        for (float s = 0.06f; s <= flame_reach; s += 0.08f) {
+            float t_norm = s / flame_reach;
+            float base_heat = (0.95f - t_norm * 0.40f);
+            float spiral_r = 0.32f * (1.0f - t_norm * 0.15f);
 
-                if (eta_r <= 0.08f) continue;
+            // Two intertwined spiraling ribbons hugging the blade twists
+            for (int t = 0; t < 2; t++) {
+                float phase = s * 2.6f + g_anim_time * 6.5f + (t * 3.14159f);
+                Vec3 radial_disp = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)),
+                                            vec3_scale(w2, spiral_r * cosf(phase)));
+                Vec3 p_tongue = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), radial_disp));
+                Vec3 rel = vec3_sub(p_tongue, cam_pos);
+                int kx = (int)(((vec3_dot(rel, right) / world_w) + 0.5f) * g_pixel_w);
+                int ky = (int)((0.5f - (vec3_dot(rel, up) / world_h)) * g_pixel_h);
+                float kz = vec3_dot(rel, fwd);
 
-                Vec3 rel_p = vec3_sub(p, cam_pos);
-                int px = (int)(((vec3_dot(rel_p, right) / world_w) + 0.5f) * g_pixel_w);
-                int py = (int)((0.5f - (vec3_dot(rel_p, up) / world_h)) * g_pixel_h);
-                float pz = vec3_dot(rel_p, fwd);
-                float flame_z = pz - g_logs[i].radius * 0.85f;
+                float flicker = 0.88f + 0.22f * sinf(g_anim_time * 12.0f + s * 3.5f + t * 2.5f);
+                float val = fminf(1.0f, base_heat * flicker * 1.10f);
 
-                float flame_h = temp * (0.25f + 0.75f * eta_r) * 1.05f;
-                for (int dy = -3; dy <= 1; dy++) {
-                    for (int dx = -3; dx <= 3; dx++) {
-                        int sx = px + dx;
-                        int sy = py + dy;
-                        if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
-                            float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
-                            if (d < 3.2f) {
-                                float val = flame_h * (1.0f - d / 3.2f);
-                                g_fire_heat[sy][sx] = fmaxf(g_fire_heat[sy][sx], val);
-                                if (flame_z < g_fire_z[sy][sx]) g_fire_z[sy][sx] = flame_z;
+                int rad = (t_norm < 0.25f) ? 2 : 1;
+
+                // Flame depth relative to camera
+                float f_depth = kz + (radial_disp.z < 0.0f ? -0.22f : 0.22f);
+
+                for (int dy = -rad; dy <= rad; dy++) {
+                    for (int dx = -rad; dx <= rad; dx++) {
+                        int px = kx + dx, py = ky + dy;
+                        if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                            float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.4f);
+                            if (d <= (float)rad) {
+                                float h = val * (1.0f - d / ((float)rad + 0.4f));
+                                g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
+                                if (f_depth < g_fire_z[py][px]) g_fire_z[py][px] = f_depth;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    } else {
+        // 1. Kindling flames emitted directly from twigs and leaves on the hearth floor!
+        float cur_kindle_heat = (g_sim_time < 240.0f) ? (g_sim_time < 60.0f ? 1.0f : fmaxf(0.0f, 1.0f - (g_sim_time - 60.0f) / 180.0f)) : 0.0f;
+        for (int tw = 0; tw < g_num_twigs; tw++) {
+            float tw_heat = (cur_kindle_heat > 0.05f) ? fmaxf(cur_kindle_heat * 0.85f, g_twigs[tw].temp) : (g_twigs[tw].active ? g_twigs[tw].temp : 0.0f);
+            if (tw_heat > 0.25f) {
+                Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
+                Vec3 rel_k = vec3_sub(mid_tw, cam_pos);
+                int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
+                int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
+                float kz = vec3_dot(rel_k, fwd);
+                float flame_z = kz - g_twigs[tw].radius * 0.9f;
+                float flame_h = tw_heat * 0.92f;
+
+                for (int dy = -2; dy <= 1; dy++) {
+                    for (int dx = -2; dx <= 2; dx++) {
+                        int px = kx + dx;
+                        int py = ky + dy;
+                        if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                            float d = sqrtf((dx * 1.0f)*(dx * 1.0f) + (dy * 1.5f)*(dy * 1.5f));
+                            if (d < 2.5f) {
+                                float val = flame_h * (1.0f - d / 2.5f);
+                                g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], val);
+                                if (flame_z < g_fire_z[py][px]) g_fire_z[py][px] = flame_z;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // 2. Heat anchored exclusively to burning wood segments inside the core draft!
+        for (int i = 0; i < g_num_logs; i++) {
+            for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                float temp = g_logs[i].segments[s].temp;
+                float moisture = g_logs[i].segments[s].moisture;
+                if (temp > 0.30f && moisture <= 0.05f) {
+                    Vec3 p = get_log_segment_pos(&g_logs[i], s);
+
+                    float r_seg = sqrtf(p.x * p.x + p.z * p.z);
+                    float r_norm = r_seg / 3.4f;
+                    float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
+
+                    if (eta_r <= 0.08f) continue;
+
+                    Vec3 rel_p = vec3_sub(p, cam_pos);
+                    int px = (int)(((vec3_dot(rel_p, right) / world_w) + 0.5f) * g_pixel_w);
+                    int py = (int)((0.5f - (vec3_dot(rel_p, up) / world_h)) * g_pixel_h);
+                    float pz = vec3_dot(rel_p, fwd);
+                    float flame_z = pz - g_logs[i].radius * 0.85f;
+
+                    float flame_h = temp * (0.25f + 0.75f * eta_r) * 1.05f;
+                    for (int dy = -3; dy <= 1; dy++) {
+                        for (int dx = -3; dx <= 3; dx++) {
+                            int sx = px + dx;
+                            int sy = py + dy;
+                            if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                                float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
+                                if (d < 3.2f) {
+                                    float val = flame_h * (1.0f - d / 3.2f);
+                                    g_fire_heat[sy][sx] = fmaxf(g_fire_heat[sy][sx], val);
+                                    if (flame_z < g_fire_z[sy][sx]) g_fire_z[sy][sx] = flame_z;
+                                }
                             }
                         }
                     }
@@ -2208,27 +2544,40 @@ static void update_simulation(void) {
         }
     }
 
-    // 3. Convective flame propagation upwards with wind turbulence
+    // 3. Convective flame propagation upwards
     for (int y = g_pixel_h - 4; y >= 2; y--) {
         for (int x = 0; x < g_pixel_w; x++) {
-            int src_x = x;
-            int wind_step = (g_wind_turb > 0.30f) ? 1 : ((g_wind_turb < -0.30f) ? -1 : 0);
-            int jitter = (xorshift32() % 3) - 1;
-            src_x += (rand_f() < 0.45f) ? wind_step : jitter;
-            if (src_x < 0) src_x = 0;
-            if (src_x >= g_pixel_w) src_x = g_pixel_w - 1;
+            float below;
+            if (g_is_dark_souls) {
+                int left = (x > 0) ? x - 1 : 0;
+                int right = (x < g_pixel_w - 1) ? x + 1 : g_pixel_w - 1;
+                float drift = sinf(g_anim_time * 5.0f + y * 0.30f);
+                int off = (drift > 0.45f) ? 1 : ((drift < -0.45f) ? -1 : 0);
+                int sx = x + off;
+                if (sx < 0) sx = 0;
+                if (sx >= g_pixel_w) sx = g_pixel_w - 1;
+                below = g_fire_heat[y + 1][x] * 0.50f + g_fire_heat[y + 1][sx] * 0.30f +
+                        (g_fire_heat[y + 1][left] + g_fire_heat[y + 1][right]) * 0.10f;
+            } else {
+                int src_x = x;
+                int wind_step = (g_wind_turb > 0.30f) ? 1 : ((g_wind_turb < -0.30f) ? -1 : 0);
+                int jitter = (xorshift32() % 3) - 1;
+                src_x += (rand_f() < 0.45f) ? wind_step : jitter;
+                if (src_x < 0) src_x = 0;
+                if (src_x >= g_pixel_w) src_x = g_pixel_w - 1;
+                below = g_fire_heat[y + 1][src_x];
+            }
 
-            float below = g_fire_heat[y + 1][src_x];
             if (below <= 0.04f) {
                 g_next_fire[y][x] = 0.0f;
                 continue;
             }
 
-            float decay = 0.032f + 0.030f * rand_f();
+            float decay = g_is_dark_souls ? (0.018f + 0.014f * rand_f()) : (0.032f + 0.030f * rand_f());
             float val = fmaxf(0.0f, below - decay);
             g_next_fire[y][x] = val;
             if (val > 0.05f) {
-                g_fire_z[y][x] = g_fire_z[y + 1][src_x];
+                g_fire_z[y][x] = g_fire_z[y + 1][x];
             }
         }
     }
@@ -2239,8 +2588,36 @@ static void update_simulation(void) {
         }
     }
 
-    // 4. Sparks Ejection from burning wood
-    if (g_sim_time < 2900.0f && rand_f() < 0.65f) {
+    // 4. Sparks Ejection from burning wood & Dark Souls Rising Embers
+    if (g_is_dark_souls) {
+        // Continuous organic embers rising from the ash mound and climbing up the coiled sword blade
+        if (rand_f() < 0.88f) {
+            float s_ember = rand_f() * 5.8f;
+            Vec3 u_sw = g_sword.axis;
+            Vec3 w1_sw = vec3_norm(vec3_cross(u_sw, (Vec3){0.0f, 0.0f, 1.0f}));
+            Vec3 w2_sw = vec3_cross(u_sw, w1_sw);
+            float a_emb = rand_f() * 6.28f;
+            float r_emb = 0.15f + rand_f() * 0.35f;
+            Vec3 disp = vec3_add(vec3_scale(w1_sw, r_emb * sinf(a_emb)), vec3_scale(w2_sw, r_emb * cosf(a_emb)));
+            Vec3 p_emb = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u_sw, s_ember), disp));
+
+            Vec3 v_emb = (Vec3){
+                (rand_f() - 0.5f) * 0.6f + sinf(p_emb.y * 2.0f + g_anim_time * 3.0f) * 0.4f,
+                rand_f() * 2.2f + 1.8f,
+                (rand_f() - 0.5f) * 0.6f
+            };
+            RGB emb_col = (rand_f() > 0.40f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[2];
+            spawn_spark_3d(p_emb, v_emb, rand_range(25, 55), emb_col);
+        }
+        // Base mound hot sparks
+        if (rand_f() < 0.45f) {
+            float r_ash = rand_f() * 1.5f;
+            float a_ash = rand_f() * 6.28f;
+            Vec3 p_ash = (Vec3){ r_ash * cosf(a_ash), -2.65f, r_ash * sinf(a_ash) };
+            Vec3 v_ash = (Vec3){ (rand_f() - 0.5f) * 0.8f, rand_f() * 2.8f + 1.5f, (rand_f() - 0.5f) * 0.8f };
+            spawn_spark_3d(p_ash, v_ash, rand_range(20, 48), PALETTE_EMBERS[rand_range(2, 4)]);
+        }
+    } else if (g_sim_time < 2900.0f && rand_f() < 0.65f) {
         for (int i = 0; i < g_num_logs; i++) {
             int s = rand_range(0, NUM_LOG_SEGS - 1);
             if (g_logs[i].segments[s].temp > 0.50f) {
@@ -2306,8 +2683,8 @@ static void render_scene(void) {
     }
 
     // Compute Camera Vectors
-    Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
-    float cam_dist = 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? -0.8f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 20.0f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2318,8 +2695,8 @@ static void render_scene(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = 22.0f;
-    float world_h = 14.0f;
+    float world_w = g_is_dark_souls ? 14.5f : 22.0f;
+    float world_h = g_is_dark_souls ? 10.0f : 14.0f;
 
     // Fire point light positioned in the hearth core with organic flicker
     float fire_activity = fmaxf(g_ash_bed.heat, 0.0f);
@@ -2331,8 +2708,8 @@ static void render_scene(void) {
         }
     }
     float flicker = (1.0f + 0.22f * sinf(g_anim_time * 8.5f + sinf(g_anim_time * 17.0f)) + 0.14f * cosf(g_anim_time * 12.0f)) * fire_activity;
-    Vec3 light_pos = (Vec3){0.0f, -1.8f, 0.0f};
-    float light_intensity = 2.2f * flicker;
+    Vec3 light_pos = (Vec3){0.0f, g_is_dark_souls ? -1.5f : -1.8f, 0.0f};
+    float light_intensity = 2.6f * flicker;
 
     // =========================================================================
     // 1. 3D Raycasting with Stones and Segmented Wood
@@ -2346,9 +2723,9 @@ static void render_scene(void) {
             Vec3 ray_dir = fwd;
 
             float closest_t = 1e9f;
-            int hit_type = 0; // 0: none, 1: stone, 2: log
+            int hit_type = 0; // 0: none, 1: stone, 2: log, 3: ash/ground, 4: twig, 5: leaf, 6: sword, 7: bone
 
-            // Test 3D Stone Fire Ring
+            // Test 3D Stone Fire Ring (Only in standard mode)
             Stone3D *hit_stone = NULL;
             Vec3 stone_pt = {0,0,0}, stone_norm = {0,1,0};
             for (int i = 0; i < g_num_stones; i++) {
@@ -2448,17 +2825,80 @@ static void render_scene(void) {
                 }
             }
 
-            // Test ground/ash bed plane — flat at ground_y, inside stone ring radius
-            // This is more realistic than a dome: ash lies on the floor between logs
+            // Test 3D Bones (Dark Souls Mode)
+            Bone3D *hit_bone = NULL;
+            Vec3 bone_pt = {0,0,0}, bone_norm = {0,1,0};
+            float bone_char = 0.0f, bone_heat = 0.0f;
+            if (g_is_dark_souls) {
+                for (int i = 0; i < g_num_bones; i++) {
+                    float t, chr, ht;
+                    Vec3 pt, norm;
+                    if (intersect_bone(&g_bones[i], ray_orig, ray_dir, &t, &pt, &norm, &chr, &ht)) {
+                        if (t < closest_t) {
+                            closest_t = t;
+                            bone_pt = pt;
+                            bone_norm = norm;
+                            bone_char = chr;
+                            bone_heat = ht;
+                            hit_bone = &g_bones[i];
+                            hit_type = 7;
+                        }
+                    }
+                }
+            }
+
+            // Test Ash Bed / Ground Plane
             Vec3 ash_bed_pt = {0,0,0}, ash_bed_norm = {0,1,0};
-            {
+            if (g_is_dark_souls) {
+                // Curved Conical Ash Mound: ellipsoid dome
+                float r_bed = 4.1f;
+                float h_bed = 1.62f;
+                Vec3 c_bed = (Vec3){0.0f, -4.20f, 0.0f};
+                Vec3 ro_s = (Vec3){ (ray_orig.x - c_bed.x) / r_bed, (ray_orig.y - c_bed.y) / h_bed, (ray_orig.z - c_bed.z) / r_bed };
+                Vec3 rd_s = (Vec3){ ray_dir.x / r_bed, ray_dir.y / h_bed, ray_dir.z / r_bed };
+                float a_s = vec3_dot(rd_s, rd_s);
+                float b_s = 2.0f * vec3_dot(ro_s, rd_s);
+                float c_s = vec3_dot(ro_s, ro_s) - 1.0f;
+                float disc_s = b_s * b_s - 4.0f * a_s * c_s;
+                if (disc_s >= 0.0f) {
+                    float sdisc_s = sqrtf(disc_s);
+                    float t0 = (-b_s - sdisc_s) / (2.0f * a_s);
+                    float t1 = (-b_s + sdisc_s) / (2.0f * a_s);
+                    float t = (t0 > 0.1f) ? t0 : t1;
+                    if (t > 0.1f && t < closest_t) {
+                        Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
+                        if (pt.y >= -4.20f) {
+                            closest_t = t;
+                            ash_bed_pt = pt;
+                            ash_bed_norm = vec3_norm((Vec3){
+                                (pt.x - c_bed.x) / (r_bed * r_bed),
+                                (pt.y - c_bed.y) / (h_bed * h_bed),
+                                (pt.z - c_bed.z) / (r_bed * r_bed)
+                            });
+                            hit_type = 3;
+                        }
+                    }
+                }
+                // Ground floor around the mound
+                if (ray_dir.y < -0.001f) {
+                    float gp_t = (-4.20f - ray_orig.y) / ray_dir.y;
+                    if (gp_t > 0.1f && gp_t < closest_t) {
+                        Vec3 gp_pt = vec3_add(ray_orig, vec3_scale(ray_dir, gp_t));
+                        float gp_r = sqrtf(gp_pt.x * gp_pt.x + gp_pt.z * gp_pt.z);
+                        if (gp_r < 7.8f) {
+                            closest_t = gp_t;
+                            ash_bed_pt = gp_pt;
+                            ash_bed_norm = (Vec3){0.0f, 1.0f, 0.0f};
+                            hit_type = 3;
+                        }
+                    }
+                }
+            } else {
                 float ground_plane_y = -4.2f;
-                // Ray-plane intersection: (ray_orig.y + t * ray_dir.y) = ground_plane_y
-                if (ray_dir.y < -0.001f) {  // Ray must point downward to hit ground
+                if (ray_dir.y < -0.001f) {
                     float gp_t = (ground_plane_y - ray_orig.y) / ray_dir.y;
                     if (gp_t > 0.1f && gp_t < closest_t) {
                         Vec3 gp_pt = vec3_add(ray_orig, vec3_scale(ray_dir, gp_t));
-                        // Only show ash within the stone ring (~5.2 units from center)
                         float gp_r = sqrtf(gp_pt.x * gp_pt.x + gp_pt.z * gp_pt.z);
                         if (gp_r < 5.2f) {
                             closest_t = gp_t;
@@ -2673,68 +3113,100 @@ static void render_scene(void) {
                 float r_core = sqrtf(ash_bed_pt.x * ash_bed_pt.x + ash_bed_pt.z * ash_bed_pt.z);
                 float core_heat = g_ash_bed.heat * fmaxf(0.0f, 1.0f - r_core / 4.2f);
 
-                // Natural hearth floor: dirt/earth ground by default
-                // Ash accumulates dynamically as wood is consumed (g_burnt_mass)
-                float ash_radius = 1.2f + 3.6f * g_burnt_mass;
-                float ash_coverage = 0.0f;
-                if (r_core < ash_radius) {
-                    ash_coverage = (1.0f - r_core / ash_radius) * (0.25f + 0.75f * g_burnt_mass);
-                }
-
-                if (ash_coverage < 0.15f) {
-                    // NATURAL HEARTH DIRT / COMPACTED EARTH
-                    float dirt_noise = (sinf(ash_bed_pt.x * 2.8f + 0.4f) * cosf(ash_bed_pt.z * 2.5f + 0.8f)) * 0.5f + 0.5f;
-                    int d_idx = (int)((s_val * 0.95f + dirt_noise * 0.20f) * 2.4f);
-                    if (d_idx < 0) d_idx = 0;
-                    if (d_idx > 4) d_idx = 4;
-                    g_shade_buf[y][x] = PALETTE_DIRT[d_idx];
-                } else {
-                    // ACCUMULATED ASH & COALS
-                    float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
-                    float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
-                    float fissure = fabsf(f1 * f2);
-
-                    if (fissure < 0.15f && core_heat > 0.22f && r_core < 2.5f) {
-                        // Deep incandescent ember vein
-                        float emb_heat = core_heat * (1.0f - fissure / 0.15f);
-                        int emb_idx = (int)(emb_heat * 3.5f);
-                        if (emb_idx < 0) emb_idx = 0;
-                        if (emb_idx > 3) emb_idx = 3;
-                        g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
-                    } else {
-                        // Calcified ash progression
-                        int ash_idx;
-                        if (r_core < 1.8f) {
-                            // Charcoal core with warm cast
-                            ash_idx = (int)(s_val * 1.2f);
-                            if (ash_idx < 0) ash_idx = 0;
-                            if (ash_idx > 1) ash_idx = 1;
-                            if (core_heat > 0.25f && ash_idx == 1) {
-                                g_shade_buf[y][x] = (RGB){
-                                    (uint8_t)fminf(255, 58 + (int)(core_heat * 50)),
-                                    (uint8_t)(50 + (int)(core_heat * 20)),
-                                    (uint8_t)(28 + (int)(core_heat * 5))
-                                };
-                                goto ash_done;
-                            }
-                        } else if (ash_coverage < 0.50f || g_burnt_mass < 0.40f) {
-                            // Early mid-grey ash
-                            ash_idx = (int)(s_val * 1.8f);
-                            if (ash_idx < 1) ash_idx = 1;
-                            if (ash_idx > 2) ash_idx = 2;
-                        } else if (ash_coverage < 0.75f || g_burnt_mass < 0.75f) {
-                            // Mid to light ash
-                            ash_idx = (int)(s_val * 2.0f + 0.8f);
-                            if (ash_idx < 2) ash_idx = 2;
-                            if (ash_idx > 3) ash_idx = 3;
+                if (g_is_dark_souls) {
+                    if (ash_bed_pt.y > -4.18f) {
+                        // On the sacred Ash Mound
+                        if (r_core < 1.35f && ash_bed_pt.y > -3.35f) {
+                            // Glowing embers and coals at the sword entry core
+                            float h_core = fmaxf(0.0f, 1.0f - r_core / 1.35f);
+                            int emb_idx = (int)(h_core * 3.8f);
+                            if (emb_idx < 1) emb_idx = 1;
+                            if (emb_idx > 3) emb_idx = 3;
+                            g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                         } else {
-                            // Late-stage thick chalky white ash
-                            ash_idx = (int)(s_val * 2.2f + 1.2f);
-                            if (ash_idx < 3) ash_idx = 3;
-                            if (ash_idx > 4) ash_idx = 4;
+                            // Dark carbonized ash and calcified soot dust (high contrast under white bones)
+                            float noise = (sinf(ash_bed_pt.x * 4.0f) * cosf(ash_bed_pt.z * 4.0f)) * 0.20f;
+                            int ash_idx = (int)((s_val + noise) * 1.8f + 0.6f);
+                            if (ash_idx < 0) ash_idx = 0;
+                            if (ash_idx > 2) ash_idx = 2;
+                            g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
                         }
-                        g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
-                        ash_done:;
+                    } else {
+                        // Ground floor around the mound: dark charred stone/ash with subtle fire halo
+                        float halo = fmaxf(0.0f, 1.0f - (r_core - 4.2f) / 3.4f);
+                        if (halo > 0.05f) {
+                            int d_idx = (int)(halo * 2.2f + s_val * 0.8f);
+                            if (d_idx < 0) d_idx = 0;
+                            if (d_idx > 2) d_idx = 2;
+                            g_shade_buf[y][x] = PALETTE_CHARRED[d_idx];
+                        } else {
+                            g_shade_buf[y][x] = PALETTE_CHARRED[0];
+                        }
+                    }
+                } else {
+                    // Natural hearth floor: dirt/earth ground by default
+                    // Ash accumulates dynamically as wood is consumed (g_burnt_mass)
+                    float ash_radius = 1.2f + 3.6f * g_burnt_mass;
+                    float ash_coverage = 0.0f;
+                    if (r_core < ash_radius) {
+                        ash_coverage = (1.0f - r_core / ash_radius) * (0.25f + 0.75f * g_burnt_mass);
+                    }
+
+                    if (ash_coverage < 0.15f) {
+                        // NATURAL HEARTH DIRT / COMPACTED EARTH
+                        float dirt_noise = (sinf(ash_bed_pt.x * 2.8f + 0.4f) * cosf(ash_bed_pt.z * 2.5f + 0.8f)) * 0.5f + 0.5f;
+                        int d_idx = (int)((s_val * 0.95f + dirt_noise * 0.20f) * 2.4f);
+                        if (d_idx < 0) d_idx = 0;
+                        if (d_idx > 4) d_idx = 4;
+                        g_shade_buf[y][x] = PALETTE_DIRT[d_idx];
+                    } else {
+                        // ACCUMULATED ASH & COALS
+                        float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
+                        float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
+                        float fissure = fabsf(f1 * f2);
+
+                        if (fissure < 0.15f && core_heat > 0.22f && r_core < 2.5f) {
+                            // Deep incandescent ember vein
+                            float emb_heat = core_heat * (1.0f - fissure / 0.15f);
+                            int emb_idx = (int)(emb_heat * 3.5f);
+                            if (emb_idx < 0) emb_idx = 0;
+                            if (emb_idx > 3) emb_idx = 3;
+                            g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                        } else {
+                            // Calcified ash progression
+                            int ash_idx;
+                            if (r_core < 1.8f) {
+                                // Charcoal core with warm cast
+                                ash_idx = (int)(s_val * 1.2f);
+                                if (ash_idx < 0) ash_idx = 0;
+                                if (ash_idx > 1) ash_idx = 1;
+                                if (core_heat > 0.25f && ash_idx == 1) {
+                                    g_shade_buf[y][x] = (RGB){
+                                        (uint8_t)fminf(255, 58 + (int)(core_heat * 50)),
+                                        (uint8_t)(50 + (int)(core_heat * 20)),
+                                        (uint8_t)(28 + (int)(core_heat * 5))
+                                    };
+                                    goto ash_done;
+                                }
+                            } else if (ash_coverage < 0.50f || g_burnt_mass < 0.40f) {
+                                // Early mid-grey ash
+                                ash_idx = (int)(s_val * 1.8f);
+                                if (ash_idx < 1) ash_idx = 1;
+                                if (ash_idx > 2) ash_idx = 2;
+                            } else if (ash_coverage < 0.75f || g_burnt_mass < 0.75f) {
+                                // Mid to light ash
+                                ash_idx = (int)(s_val * 2.0f + 0.8f);
+                                if (ash_idx < 2) ash_idx = 2;
+                                if (ash_idx > 3) ash_idx = 3;
+                            } else {
+                                // Late-stage thick chalky white ash
+                                ash_idx = (int)(s_val * 2.2f + 1.2f);
+                                if (ash_idx < 3) ash_idx = 3;
+                                if (ash_idx > 4) ash_idx = 4;
+                            }
+                            g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                            ash_done:;
+                        }
                     }
                 }
 
@@ -2819,33 +3291,85 @@ static void render_scene(void) {
                 float ambient = 0.28f + 0.14f * fmaxf(0.0f, sword_norm.y);
                 float light_val = ndotl * atten * light_intensity * 2.2f + ambient + spec;
 
-                if (sword_part == 0 && sword_heat > 0.08f) {
-                    float h = sword_heat * (0.65f + 0.35f * flicker);
-                    if (h > 0.82f) {
-                        g_shade_buf[y][x] = (RGB){255, 245, 200}; // Incandescent white-hot
-                    } else if (h > 0.58f) {
-                        g_shade_buf[y][x] = PALETTE_EMBERS[3];     // Bright flame orange
-                    } else if (h > 0.35f) {
-                        g_shade_buf[y][x] = PALETTE_EMBERS[2];     // Molten red
-                    } else if (h > 0.16f) {
-                        g_shade_buf[y][x] = PALETTE_EMBERS[1];     // Dark cherry red
+                if (sword_part == 0) {
+                    // Coiled Blade: Burnt reddish-orange bronze alloy with incandescence along twists
+                    int b_idx = (int)(light_val * 1.8f);
+                    if (b_idx < 0) b_idx = 0;
+                    if (b_idx > 4) b_idx = 4;
+                    RGB bronze_col = PALETTE_IRON[b_idx];
+
+                    if (spec > 0.38f) {
+                        bronze_col = PALETTE_IRON[4]; // Copper/bronze specular gleam
+                    }
+
+                    if (sword_heat > 0.05f) {
+                        float h = sword_heat * (0.68f + 0.32f * flicker);
+                        RGB heat_col;
+                        if (h > 0.82f) heat_col = (RGB){255, 242, 195};   // White-hot incandescent core
+                        else if (h > 0.55f) heat_col = PALETTE_EMBERS[3]; // Golden yellow flame
+                        else if (h > 0.32f) heat_col = PALETTE_EMBERS[2]; // Fiery orange-red
+                        else if (h > 0.14f) heat_col = PALETTE_EMBERS[1]; // Glowing cherry red
+                        else heat_col = (RGB){172, 54, 22};               // Burnt red-orange heat patina
+
+                        // Blend heat into bronze blade so the metallic character and edge highlights are preserved
+                        float heat_blend = fminf(0.85f, h * 1.15f);
+                        g_shade_buf[y][x] = (RGB){
+                            (uint8_t)fminf(255.0f, bronze_col.r * (1.0f - heat_blend) + heat_col.r * heat_blend),
+                            (uint8_t)fminf(255.0f, bronze_col.g * (1.0f - heat_blend) + heat_col.g * heat_blend),
+                            (uint8_t)fminf(255.0f, bronze_col.b * (1.0f - heat_blend) + heat_col.b * heat_blend)
+                        };
                     } else {
-                        g_shade_buf[y][x] = (RGB){90, 32, 20};     // Glowing ember edge
+                        // Unheated upper blade: burnt reddish-orange bronze
+                        g_shade_buf[y][x] = bronze_col;
                     }
                 } else if (sword_part == 2) {
-                    // Leather-wrapped grip
+                    // Dark leather-bound grip with aged bronze wire wrap
                     int grip_band = ((int)(sword_pt.y * 14.0f)) % 2;
-                    int c_idx = (int)(light_val * 1.5f) + (grip_band ? 1 : 0);
+                    int c_idx = (int)(light_val * 1.4f) + (grip_band ? 1 : 0);
                     if (c_idx < 0) c_idx = 0;
-                    if (c_idx > 4) c_idx = 4;
+                    if (c_idx > 3) c_idx = 3;
                     g_shade_buf[y][x] = PALETTE_IRON[c_idx];
                 } else {
-                    // Weathered forged steel for upper blade, guard, and pommel
+                    // Guard, quillons & pommel: forged burned bronze with specular edge
                     int c_idx = (int)(light_val * 1.8f);
-                    if (spec > 0.45f) c_idx = 4;
+                    if (spec > 0.40f) c_idx = 4;
                     if (c_idx < 0) c_idx = 0;
                     if (c_idx > 4) c_idx = 4;
                     g_shade_buf[y][x] = PALETTE_IRON[c_idx];
+                }
+
+            } else if (hit_type == 7 && hit_bone != NULL) {
+                g_id_buf[y][x] = hit_bone->obj_id;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(bone_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, bone_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, vec3_dot(bone_norm, l_dir));
+                // Bones catch both warm core light and bright front ambient illumination
+                float front_amb = 0.58f + 0.22f * fmaxf(0.0f, bone_norm.y) - 0.22f * bone_norm.z;
+                float light_val = ndotl * atten * light_intensity * 2.2f + front_amb;
+
+                if (bone_char > 0.85f) {
+                    // Deep dark socket void or nasal cavity
+                    g_shade_buf[y][x] = PALETTE_BONE[0];
+                } else if (bone_heat > 0.50f) {
+                    // Glowing charred bone near embers
+                    int emb_idx = (int)(bone_heat * 3.5f);
+                    if (emb_idx < 0) emb_idx = 0;
+                    if (emb_idx > 3) emb_idx = 3;
+                    g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                } else if (bone_char > 0.65f) {
+                    // Heavily charred calcified bone
+                    g_shade_buf[y][x] = PALETTE_BONE[1];
+                } else {
+                    // Ancient weathered bleached bone white (striking pale ivory)
+                    int b_idx = (int)(light_val * 1.8f + 1.2f);
+                    if (bone_char > 0.25f && b_idx > 2) b_idx--; // subtle soot dusting
+                    if (b_idx < 2) b_idx = 2;
+                    if (b_idx > 4) b_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_BONE[b_idx];
                 }
             }
         }
@@ -2865,7 +3389,15 @@ static void render_scene(void) {
                 if (ny >= 0 && ny < g_pixel_h && nx >= 0 && nx < g_pixel_w) {
                     int nid = g_id_buf[ny][nx];
                     if (nid != curr_id) {
-                        if (nid == 0 || g_depth_buf[y][x] < g_depth_buf[ny][nx]) {
+                        if (curr_id >= OBJ_BONE_BASE && nid >= OBJ_BONE_BASE) {
+                            // Do not outline neighboring bones against each other unless distinct depth gap
+                            if (fabsf(g_depth_buf[y][x] - g_depth_buf[ny][nx]) > 0.65f) {
+                                is_edge = true;
+                                break;
+                            }
+                        } else if (curr_id >= OBJ_BONE_BASE && nid == OBJ_ASH_BED) {
+                            // Let bones rest smoothly into the ash mound without artificial black rings
+                        } else if (nid == 0 || g_depth_buf[y][x] < g_depth_buf[ny][nx] - 0.20f) {
                             is_edge = true;
                             break;
                         }
@@ -2877,10 +3409,12 @@ static void render_scene(void) {
             }
 
             if (is_edge) {
-                if (curr_id >= OBJ_LEAF_BASE) {
+                if (curr_id >= OBJ_BONE_BASE) {
+                    g_frame[y][x].color = g_shade_buf[y][x]; // Keep rich bone shading and eye socket voids intact
+                } else if (curr_id >= OBJ_LEAF_BASE) {
                     g_frame[y][x].color = g_shade_buf[y][x];
                 } else if (curr_id == OBJ_ASH_BED) {
-                    g_frame[y][x].color = PALETTE_DIRT[0];
+                    g_frame[y][x].color = g_is_dark_souls ? g_shade_buf[y][x] : PALETTE_DIRT[0];
                 } else if (curr_id == OBJ_SWORD) {
                     g_frame[y][x].color = PALETTE_IRON[0];
                 } else {
@@ -2907,7 +3441,40 @@ static void render_scene(void) {
                 else fire_col = PALETTE_EMBERS[0];
 
                 if (g_id_buf[y][x] > 0) {
-                    if (g_id_buf[y][x] == OBJ_ASH_BED || g_fire_z[y][x] < g_depth_buf[y][x] - 0.06f) {
+                    if (g_is_dark_souls) {
+                        if (g_id_buf[y][x] == OBJ_ASH_BED) {
+                            g_frame[y][x].color = fire_col;
+                            g_frame[y][x].is_sky = false;
+                        } else if (g_id_buf[y][x] >= OBJ_BONE_BASE) {
+                            // Bones in foreground: keep bone visible with warm flame lighting tint
+                            if (g_fire_z[y][x] < g_depth_buf[y][x] - 0.25f) {
+                                g_frame[y][x].color = fire_col; // flame in front of bone
+                            } else {
+                                // Additive fire glow over the bone surface
+                                RGB base_c = g_frame[y][x].color;
+                                float fire_alpha = heat * 0.45f;
+                                g_frame[y][x].color = (RGB){
+                                    (uint8_t)fminf(255.0f, base_c.r * (1.0f - fire_alpha) + fire_col.r * fire_alpha),
+                                    (uint8_t)fminf(255.0f, base_c.g * (1.0f - fire_alpha) + fire_col.g * fire_alpha),
+                                    (uint8_t)fminf(255.0f, base_c.b * (1.0f - fire_alpha) + fire_col.b * fire_alpha)
+                                };
+                            }
+                            g_frame[y][x].is_sky = false;
+                        } else if (g_id_buf[y][x] == OBJ_SWORD) {
+                            // Sword: flame licks around the coiled bronze sword with warm translucency
+                            RGB base_c = g_frame[y][x].color;
+                            float fire_alpha = (g_fire_z[y][x] < g_depth_buf[y][x] - 0.25f) ? (heat * 0.60f) : (heat * 0.32f);
+                            g_frame[y][x].color = (RGB){
+                                (uint8_t)fminf(255.0f, base_c.r * (1.0f - fire_alpha) + fire_col.r * fire_alpha),
+                                (uint8_t)fminf(255.0f, base_c.g * (1.0f - fire_alpha) + fire_col.g * fire_alpha),
+                                (uint8_t)fminf(255.0f, base_c.b * (1.0f - fire_alpha) + fire_col.b * fire_alpha)
+                            };
+                            g_frame[y][x].is_sky = false;
+                        } else if (g_fire_z[y][x] < g_depth_buf[y][x] - 0.08f) {
+                            g_frame[y][x].color = fire_col;
+                            g_frame[y][x].is_sky = false;
+                        }
+                    } else if (g_id_buf[y][x] == OBJ_ASH_BED || g_fire_z[y][x] < g_depth_buf[y][x] - 0.06f) {
                         g_frame[y][x].color = fire_col;
                         g_frame[y][x].is_sky = false;
                     }
@@ -3105,7 +3672,7 @@ static void present_frame(void) {
 
     if (g_is_dark_souls) {
         buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;31m[FOGUEIRA DARK SOULS]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
+            "\033[1;31m[BONFIRE LIT]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [K/F] Avivar [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
             el_min, el_sec, tot_min, rem_min, rem_sec,
             g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
     } else {
@@ -3144,9 +3711,22 @@ static void handle_input(void) {
             g_cam_yaw -= 0.08f;
         } else if (ch == 'd' || ch == 'D' || ch == 'l') {
             g_cam_yaw += 0.08f;
-        } else if (ch == 'w' || ch == 'W' || ch == 'k') {
-            g_cam_pitch += 0.06f;
-            if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+        } else if (ch == 'w' || ch == 'W' || ch == 'k' || ch == 'K') {
+            if (ch == 'k' || ch == 'K') {
+                if (g_is_dark_souls) {
+                    for (int sp = 0; sp < 45; sp++) {
+                        Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
+                        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
+                        spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+                    }
+                } else {
+                    g_cam_pitch += 0.06f;
+                    if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+                }
+            } else {
+                g_cam_pitch += 0.06f;
+                if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+            }
         } else if (ch == 's' || ch == 'S' || ch == 'j') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
@@ -3156,7 +3736,15 @@ static void handle_input(void) {
             g_is_dark_souls = !g_is_dark_souls;
             init_scene();
         } else if (ch == 'f' || ch == 'F') {
-            if (!g_is_dark_souls) stoke_fire_add_wood();
+            if (!g_is_dark_souls) {
+                stoke_fire_add_wood();
+            } else {
+                for (int sp = 0; sp < 45; sp++) {
+                    Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
+                    Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
+                    spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+                }
+            }
         } else if (ch == 'r' || ch == 'R') {
             init_scene();
         } else if (ch == 'q' || ch == 'Q') {
@@ -3308,7 +3896,11 @@ int main(int argc, char **argv) {
         int target_min = (int)(g_cycle_duration / 60.0f);
         if (el_min >= 1) {
             char mode_desc[64];
-            snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
+            if (g_is_dark_souls) {
+                snprintf(mode_desc, sizeof(mode_desc), "Fogueira Dark Souls (Coiled Sword)");
+            } else {
+                snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
+            }
             log_bonfire_history(target_min, el_min, mode_desc, false);
         }
     }
