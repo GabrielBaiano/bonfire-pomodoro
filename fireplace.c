@@ -176,9 +176,9 @@ typedef struct {
     bool snapped;                      // True if center fiber has structurally fractured
     bool fractured;                    // True if split into two sub-cylinders
     float fracture_prog;               // Progress of split displacement [0.0, 1.0]
-    Vec3 break_p;                      // Dynamic break point position
-    Vec3 break_p_orig;                 // Initial break point
-    Vec3 break_p_target;               // Final settled break point
+    float break_t;                     // Fracture split ratio along the log [0.25..0.75]
+    Vec3 break_p1, break_p1_orig, break_p1_target; // Piece 1 broken tip
+    Vec3 break_p2, break_p2_orig, break_p2_target; // Piece 2 broken tip
 } Cylinder3D;
 
 typedef struct {
@@ -381,6 +381,28 @@ static void recompute_cylinder_axes(Cylinder3D *c) {
     c->bitangent = vec3_cross(c->dir, c->tangent);
 }
 
+static inline Vec3 get_log_segment_pos(const Cylinder3D *c, int s) {
+    float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+    if (!c->fractured) {
+        Vec3 p = vec3_add(c->p1, vec3_scale(c->axis, t_val));
+        if (c->sag_amount > 0.01f) {
+            p.y -= 4.0f * t_val * (1.0f - t_val) * c->sag_amount;
+        }
+        return p;
+    } else {
+        float break_t = (c->break_t > 0.05f) ? c->break_t : 0.5f;
+        if (t_val <= break_t) {
+            float sub_t = t_val / break_t;
+            Vec3 sub_axis = vec3_sub(c->break_p1, c->p1);
+            return vec3_add(c->p1, vec3_scale(sub_axis, sub_t));
+        } else {
+            float sub_t = (t_val - break_t) / (1.0f - break_t);
+            Vec3 sub_axis = vec3_sub(c->p2, c->break_p2);
+            return vec3_add(c->break_p2, vec3_scale(sub_axis, sub_t));
+        }
+    }
+}
+
 static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_collapsed, Vec3 p2_collapsed, float radius, float charred) {
     c->obj_id = id;
     c->p1 = p1;
@@ -402,9 +424,14 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->snapped = false;
     c->fractured = false;
     c->fracture_prog = 0.0f;
-    c->break_p = vec3_scale(vec3_add(p1, p2), 0.5f);
-    c->break_p_orig = c->break_p;
-    c->break_p_target = (Vec3){ c->break_p.x, -4.2f + radius, c->break_p.z };
+    c->break_t = 0.5f;
+    Vec3 mid = vec3_scale(vec3_add(p1, p2), 0.5f);
+    c->break_p1 = mid;
+    c->break_p1_orig = mid;
+    c->break_p1_target = (Vec3){ mid.x, -4.2f + radius, mid.z };
+    c->break_p2 = mid;
+    c->break_p2_orig = mid;
+    c->break_p2_target = (Vec3){ mid.x, -4.2f + radius, mid.z };
     for (int s = 0; s < NUM_LOG_SEGS; s++) {
         c->segments[s].temp = 0.0f;
         c->segments[s].moisture = 0.18f; // 18% moisture content
@@ -988,7 +1015,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
         return false;
     }
 
-    // Fractured cylinder: test both sub-halves
+    // Fractured cylinder: test both independent sub-halves
     float best_t = 1e9f;
     bool hit = false;
     Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
@@ -996,31 +1023,36 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
     bool best_cap = false;
     int best_seg = 0;
 
-    // Sub A: p1 -> break_p (segments 0..4)
+    float break_t = (c->break_t > 0.05f) ? c->break_t : 0.5f;
+    int break_seg_split = (int)(break_t * NUM_LOG_SEGS);
+    if (break_seg_split < 1) break_seg_split = 1;
+    if (break_seg_split >= NUM_LOG_SEGS - 1) break_seg_split = NUM_LOG_SEGS - 2;
+
+    // Sub A: p1 -> break_p1
     float tA, uA, vA, rfA;
     Vec3 ptA, normA;
     bool capA;
-    if (intersect_sub_cylinder(c->p1, c->break_p, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
+    if (intersect_sub_cylinder(c->p1, c->break_p1, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
                                &tA, &ptA, &normA, &uA, &vA, &capA, &rfA, true, true)) {
         if (tA < best_t) {
             best_t = tA; best_pt = ptA; best_norm = normA;
-            best_u = uA; best_v = vA * 0.5f; best_cap = capA; best_rf = rfA;
-            best_seg = (int)(vA * (NUM_LOG_SEGS / 2));
-            if (best_seg >= NUM_LOG_SEGS / 2) best_seg = NUM_LOG_SEGS / 2 - 1;
+            best_u = uA; best_v = vA * break_t; best_cap = capA; best_rf = rfA;
+            best_seg = (int)(vA * break_seg_split);
+            if (best_seg >= break_seg_split) best_seg = break_seg_split - 1;
             hit = true;
         }
     }
 
-    // Sub B: break_p -> p2 (segments 5..9)
+    // Sub B: break_p2 -> p2
     float tB, uB, vB, rfB;
     Vec3 ptB, normB;
     bool capB;
-    if (intersect_sub_cylinder(c->break_p, c->p2, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
+    if (intersect_sub_cylinder(c->break_p2, c->p2, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
                                &tB, &ptB, &normB, &uB, &vB, &capB, &rfB, true, true)) {
         if (tB < best_t) {
             best_t = tB; best_pt = ptB; best_norm = normB;
-            best_u = uB; best_v = 0.5f + vB * 0.5f; best_cap = capB; best_rf = rfB;
-            best_seg = (NUM_LOG_SEGS / 2) + (int)(vB * (NUM_LOG_SEGS - NUM_LOG_SEGS / 2));
+            best_u = uB; best_v = break_t + vB * (1.0f - break_t); best_cap = capB; best_rf = rfB;
+            best_seg = break_seg_split + (int)(vB * (NUM_LOG_SEGS - break_seg_split));
             if (best_seg >= NUM_LOG_SEGS) best_seg = NUM_LOG_SEGS - 1;
             hit = true;
         }
@@ -1194,12 +1226,7 @@ static void update_simulation(void) {
         // ---------------------------------------------------------------------
         for (int i = 0; i < g_num_logs; i++) {
             for (int s = 0; s < NUM_LOG_SEGS; s++) {
-                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
-                Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
-
-                if (g_logs[i].sag_amount > 0.01f) {
-                    seg_p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
-                }
+                Vec3 seg_p = get_log_segment_pos(&g_logs[i], s);
 
                 float r_seg = sqrtf(seg_p.x * seg_p.x + seg_p.z * seg_p.z);
                 float r_norm = r_seg / 3.6f;
@@ -1228,8 +1255,7 @@ static void update_simulation(void) {
                     if (i == j) continue;
                     for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
                         if (g_logs[j].segments[sj].burn_progress > 0.03f && g_logs[j].segments[sj].temp > 0.30f && g_logs[j].segments[sj].structural_mass > 0.10f) {
-                            float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
-                            Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
+                            Vec3 pj = get_log_segment_pos(&g_logs[j], sj);
                             float d_cross = vec3_len(vec3_sub(seg_p, pj));
                             float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
                             if (d_cross_surf < 1.6f) {
@@ -1401,8 +1427,7 @@ static void update_simulation(void) {
                 Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
                 for (int i = 0; i < g_num_logs; i++) {
                     for (int s = 0; s < NUM_LOG_SEGS; s++) {
-                        float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
-                        Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                        Vec3 seg_p = get_log_segment_pos(&g_logs[i], s);
                         float d = vec3_len(vec3_sub(seg_p, mid_tw));
                         if (d < 1.8f) {
                             g_logs[i].segments[s].temp += 0.0040f * (1.0f - d / 1.8f) * g_twigs[tw].temp * step_dt;
@@ -1464,22 +1489,74 @@ static void update_simulation(void) {
             }
 
             // Snap fracture when central mass is structurally exhausted
-            if (own_center_mass < 0.22f && !g_logs[i].snapped) {
+            float snap_threshold = 0.22f + 0.05f * sinf(i * 3.7f + 0.8f);
+            if (own_center_mass < snap_threshold && !g_logs[i].snapped) {
                 g_logs[i].snapped = true;
                 g_logs[i].fractured = true;
 
-                Vec3 ctr_p = vec3_scale(vec3_add(g_logs[i].p1, g_logs[i].p2), 0.5f);
-                ctr_p.y -= g_logs[i].sag_amount;
+                // 1. Asymmetric fracture position along wood grain
+                int min_s = 3;
+                float min_m = 999.0f;
+                for (int s = 2; s <= 7; s++) {
+                    if (g_logs[i].segments[s].structural_mass < min_m) {
+                        min_m = g_logs[i].segments[s].structural_mass;
+                        min_s = s;
+                    }
+                }
+                float r_jitter = (rand_f() - 0.5f) * 0.35f;
+                float break_t = (min_s + 0.5f + r_jitter) / (float)NUM_LOG_SEGS;
+                if (break_t < 0.28f) break_t = 0.28f;
+                if (break_t > 0.72f) break_t = 0.72f;
+                g_logs[i].break_t = break_t;
+
+                Vec3 axis_cur = vec3_sub(g_logs[i].p2, g_logs[i].p1);
+                Vec3 break_orig = vec3_add(g_logs[i].p1, vec3_scale(axis_cur, break_t));
+                break_orig.y -= g_logs[i].sag_amount;
+
+                g_logs[i].break_p1 = break_orig;
+                g_logs[i].break_p1_orig = break_orig;
+                g_logs[i].break_p2 = break_orig;
+                g_logs[i].break_p2_orig = break_orig;
+
+                // 2. Lateral kick vector perpendicular to log axis in XZ plane
+                Vec3 lat_kick = (Vec3){ -g_logs[i].dir.z, 0.0f, g_logs[i].dir.x };
+                float kick_dir = (rand_f() > 0.5f) ? 1.0f : -1.0f;
+                float kick_mag1 = 0.7f + rand_f() * 1.3f;
+                float kick_mag2 = 0.6f + rand_f() * 1.2f;
+
+                float p1_ground_y = -4.2f + g_logs[i].radius * 0.85f + rand_f() * 0.30f;
+                float p2_ground_y = -4.2f + g_logs[i].radius * 0.85f + rand_f() * 0.30f;
+
+                g_logs[i].break_p1_target = (Vec3){
+                    break_orig.x + lat_kick.x * kick_mag1 * kick_dir + (rand_f() - 0.5f) * 0.5f,
+                    p1_ground_y,
+                    break_orig.z + lat_kick.z * kick_mag1 * kick_dir + (rand_f() - 0.5f) * 0.5f
+                };
+
+                g_logs[i].break_p2_target = (Vec3){
+                    break_orig.x - lat_kick.x * kick_mag2 * kick_dir + (rand_f() - 0.5f) * 0.5f,
+                    p2_ground_y,
+                    break_orig.z - lat_kick.z * kick_mag2 * kick_dir + (rand_f() - 0.5f) * 0.5f
+                };
+
+                // Asymmetric tilt & shift on the outer ends upon snapping
+                g_logs[i].p1_collapsed.x += (rand_f() - 0.5f) * 0.9f;
+                g_logs[i].p1_collapsed.z += (rand_f() - 0.5f) * 0.9f;
+                g_logs[i].p1_collapsed.y = fmaxf(-4.2f + g_logs[i].radius, g_logs[i].p1_collapsed.y + (rand_f() - 0.5f) * 0.3f);
+
+                g_logs[i].p2_collapsed.x += (rand_f() - 0.5f) * 0.9f;
+                g_logs[i].p2_collapsed.z += (rand_f() - 0.5f) * 0.9f;
+                g_logs[i].p2_collapsed.y = fmaxf(-4.2f + g_logs[i].radius, g_logs[i].p2_collapsed.y + (rand_f() - 0.5f) * 0.3f);
 
                 // Sparks burst
-                for (int sp = 0; sp < 16; sp++) {
-                    Vec3 snap_v = (Vec3){(rand_f() - 0.5f) * 2.5f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 2.5f};
-                    spawn_spark_3d(ctr_p, snap_v, rand_range(25, 60), PALETTE_EMBERS[rand_range(2, 4)]);
+                for (int sp = 0; sp < 22; sp++) {
+                    Vec3 snap_v = (Vec3){(rand_f() - 0.5f) * 3.0f, rand_f() * 4.0f + 1.8f, (rand_f() - 0.5f) * 3.0f};
+                    spawn_spark_3d(break_orig, snap_v, rand_range(25, 60), PALETTE_EMBERS[rand_range(2, 4)]);
                 }
                 // Soot smoke puff
-                for (int sk = 0; sk < 8; sk++) {
-                    Vec3 smk_v = (Vec3){(rand_f() - 0.5f) * 1.6f + g_wind_turb * 0.5f, rand_f() * 2.5f + 1.0f, (rand_f() - 0.5f) * 1.6f};
-                    spawn_smoke_3d(ctr_p, smk_v, 0.48f, 3.5f, 2);
+                for (int sk = 0; sk < 10; sk++) {
+                    Vec3 smk_v = (Vec3){(rand_f() - 0.5f) * 1.8f + g_wind_turb * 0.5f, rand_f() * 2.8f + 1.2f, (rand_f() - 0.5f) * 1.8f};
+                    spawn_smoke_3d(break_orig, smk_v, 0.52f, 3.8f, 2);
                 }
             }
 
@@ -1510,13 +1587,19 @@ static void update_simulation(void) {
 
             if (g_logs[i].fractured) {
                 if (g_logs[i].fracture_prog < 1.0f) {
-                    g_logs[i].fracture_prog += 0.015f * step_dt * 40.0f;
+                    g_logs[i].fracture_prog += 0.016f * step_dt * 40.0f;
                     if (g_logs[i].fracture_prog > 1.0f) g_logs[i].fracture_prog = 1.0f;
                 }
                 float fp = g_logs[i].fracture_prog;
-                g_logs[i].break_p.x = g_logs[i].break_p_orig.x * (1.0f - fp) + g_logs[i].break_p_target.x * fp;
-                g_logs[i].break_p.y = g_logs[i].break_p_orig.y * (1.0f - fp) + g_logs[i].break_p_target.y * fp;
-                g_logs[i].break_p.z = g_logs[i].break_p_orig.z * (1.0f - fp) + g_logs[i].break_p_target.z * fp;
+                float s_fp = fp * fp * (3.0f - 2.0f * fp);
+
+                g_logs[i].break_p1.x = g_logs[i].break_p1_orig.x * (1.0f - s_fp) + g_logs[i].break_p1_target.x * s_fp;
+                g_logs[i].break_p1.y = g_logs[i].break_p1_orig.y * (1.0f - s_fp) + g_logs[i].break_p1_target.y * s_fp;
+                g_logs[i].break_p1.z = g_logs[i].break_p1_orig.z * (1.0f - s_fp) + g_logs[i].break_p1_target.z * s_fp;
+
+                g_logs[i].break_p2.x = g_logs[i].break_p2_orig.x * (1.0f - s_fp) + g_logs[i].break_p2_target.x * s_fp;
+                g_logs[i].break_p2.y = g_logs[i].break_p2_orig.y * (1.0f - s_fp) + g_logs[i].break_p2_target.y * s_fp;
+                g_logs[i].break_p2.z = g_logs[i].break_p2_orig.z * (1.0f - s_fp) + g_logs[i].break_p2_target.z * s_fp;
             }
 
             recompute_cylinder_axes(&g_logs[i]);
@@ -1606,11 +1689,7 @@ static void update_simulation(void) {
             float temp = g_logs[i].segments[s].temp;
             float moisture = g_logs[i].segments[s].moisture;
             if (temp > 0.30f && moisture <= 0.05f) {
-                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
-                Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
-                if (g_logs[i].sag_amount > 0.01f) {
-                    p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
-                }
+                Vec3 p = get_log_segment_pos(&g_logs[i], s);
 
                 float r_seg = sqrtf(p.x * p.x + p.z * p.z);
                 float r_norm = r_seg / 3.4f;
@@ -1679,11 +1758,7 @@ static void update_simulation(void) {
         for (int i = 0; i < g_num_logs; i++) {
             int s = rand_range(0, NUM_LOG_SEGS - 1);
             if (g_logs[i].segments[s].temp > 0.50f) {
-                float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
-                Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
-                if (g_logs[i].sag_amount > 0.01f) {
-                    p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
-                }
+                Vec3 p = get_log_segment_pos(&g_logs[i], s);
                 Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind_turb * 1.4f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
                 RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
                 spawn_spark_3d(p, spark_v, rand_range(16, 42), spark_col);
