@@ -2619,13 +2619,13 @@ static void present_frame(void) {
     else if (g_sim_time > 360.0f) stage_name = "3/7: Fogueira Roaring";
     else if (g_sim_time > 120.0f) stage_name = "2/7: Ignição e Pirólise";
 
-    const char *mode_name = "Fogueira Quadrada";
-    if (g_stack_mode == 1) mode_name = "Tenda Cônica";
-    else if (g_stack_mode == 2) mode_name = "Pirâmide";
+    const char *mode_name = "1: Empilhada (Quadrada)";
+    if (g_stack_mode == 1) mode_name = "2: Tenda Cônica";
+    else if (g_stack_mode == 2) mode_name = "3: Pirâmide";
 
     if (g_show_hud) {
         buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;33m[3D Lareira]\033[0m %02d:%02d / %02d:00 (Restante: %02d:%02d) [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [I] Relógio [F] Lenha [+/-] Vel [Q] Sair ",
+            "\033[1;33m[3D Lareira]\033[0m %02d:%02d / %02d:00 (Restante: %02d:%02d) [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [I] Relógio [1/2/3/P] Pilha [F] Lenha [+/-] Vel [Q] Sair ",
             el_min, el_sec, tot_min, rem_min, rem_sec, g_realtime_mode ? "Real" : "Fast", g_time_scale, mode_name, stage_name);
     }
 
@@ -2666,8 +2666,17 @@ static void handle_input(void) {
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'f' || ch == 'F') {
             stoke_fire_add_wood();
-        } else if (ch == 'p' || ch == 'P') {
+        } else if (ch == 'p' || ch == 'P' || ch == 'm' || ch == 'M') {
             g_stack_mode = (g_stack_mode + 1) % 3;
+            init_scene();
+        } else if (ch == '1') {
+            g_stack_mode = 0;
+            init_scene();
+        } else if (ch == '2') {
+            g_stack_mode = 1;
+            init_scene();
+        } else if (ch == '3') {
+            g_stack_mode = 2;
             init_scene();
         } else if (ch == 'x' || ch == 'X') {
             g_realtime_mode = !g_realtime_mode;
@@ -2713,6 +2722,14 @@ int main(int argc, char **argv) {
         } else if (strcmp(argv[i], "--fast") == 0) {
             g_realtime_mode = false;
             g_time_scale = 30.0f;
+        } else if (strcmp(argv[i], "--empilhada") == 0 || strcmp(argv[i], "--quadrada") == 0 || strcmp(argv[i], "--cabin") == 0) {
+            g_stack_mode = 0;
+        } else if (strcmp(argv[i], "--tenda") == 0 || strcmp(argv[i], "--teepee") == 0) {
+            g_stack_mode = 1;
+        } else if (strcmp(argv[i], "--piramide") == 0 || strcmp(argv[i], "--pyramid") == 0) {
+            g_stack_mode = 2;
+        } else if ((strcmp(argv[i], "--stack") == 0 || strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--pilha") == 0) && i + 1 < argc) {
+            g_stack_mode = atoi(argv[++i]) % 3;
         } else if ((strcmp(argv[i], "--time") == 0 || strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--pomodoro") == 0) && i + 1 < argc) {
             float mins = (float)atof(argv[++i]);
             if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
