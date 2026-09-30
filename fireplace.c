@@ -29,6 +29,7 @@
 #include <sys/ioctl.h>
 #include <signal.h>
 #include <sys/stat.h>
+#include <strings.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -49,16 +50,60 @@ typedef struct {
 
 static const RGB COLOR_BLACK = {0, 0, 0};
 
-// Natural Oak & Pine Bark Palette (No orange neon stripes!)
-static const RGB PALETTE_WOOD[] = {
-    {20, 12, 8},      // 0: Dark Outline / Deep crevice
-    {42, 27, 18},     // 1: Deep shadow bark (raw umber)
-    {72, 48, 32},     // 2: Dark weathered oak
-    {105, 72, 48},    // 3: Mid oak bark
-    {138, 96, 64},    // 4: Warm dry timber fiber
-    {168, 120, 82},   // 5: Muted wood highlight
-    {200, 145, 102}   // 6: Warm firelit rim
+typedef struct {
+    const char *name;
+    RGB palette_wood[7];
+    RGB palette_endcap[5];
+    float crackle_mult;
+    float burn_rate_mult;
+} WoodSpecies;
+
+static const WoodSpecies WOOD_SPECIES[4] = {
+    {
+        "Carvalho",
+        {
+            {20, 12, 8}, {42, 27, 18}, {72, 48, 32}, {105, 72, 48}, {138, 96, 64}, {168, 120, 82}, {200, 145, 102}
+        },
+        {
+            {20, 12, 8}, {92, 60, 38}, {130, 88, 56}, {168, 116, 78}, {205, 150, 105}
+        },
+        0.85f, 1.0f
+    },
+    {
+        "Pinho",
+        {
+            {24, 14, 6}, {52, 32, 16}, {88, 58, 28}, {124, 84, 42}, {162, 114, 58}, {198, 145, 82}, {228, 175, 110}
+        },
+        {
+            {24, 14, 6}, {110, 72, 34}, {152, 104, 52}, {192, 138, 76}, {230, 178, 115}
+        },
+        2.4f, 1.15f
+    },
+    {
+        "Bétula",
+        {
+            {24, 24, 22}, {60, 60, 56}, {105, 102, 96}, {150, 148, 142}, {192, 190, 184}, {225, 224, 218}, {248, 246, 242}
+        },
+        {
+            {24, 24, 22}, {102, 78, 52}, {145, 114, 78}, {188, 152, 110}, {225, 190, 145}
+        },
+        1.2f, 1.05f
+    },
+    {
+        "Cerejeira",
+        {
+            {24, 10, 10}, {50, 22, 20}, {84, 38, 32}, {120, 56, 48}, {158, 80, 68}, {192, 108, 92}, {225, 140, 120}
+        },
+        {
+            {24, 10, 10}, {104, 48, 40}, {148, 72, 60}, {190, 102, 85}, {228, 145, 122}
+        },
+        0.9f, 0.95f
+    }
 };
+
+static int g_wood_type = -1; // -1: pick randomly on init_scene
+#define PALETTE_WOOD (WOOD_SPECIES[(g_wood_type >= 0 && g_wood_type < 4) ? g_wood_type : 0].palette_wood)
+#define PALETTE_ENDCAP (WOOD_SPECIES[(g_wood_type >= 0 && g_wood_type < 4) ? g_wood_type : 0].palette_endcap)
 
 // Charcoal and Carbonized Black Bark
 static const RGB PALETTE_CHARRED[] = {
@@ -77,15 +122,6 @@ static const RGB PALETTE_STONE[] = {
     {96, 88, 82},     // 3: Weathered mineral rock
     {128, 115, 102},  // 4: Warm firelit stone face
     {165, 145, 122}   // 5: Bright fire reflection
-};
-
-// End-cap cut face with concentric tree rings
-static const RGB PALETTE_ENDCAP[] = {
-    {20, 12, 8},      // 0: Outer bark rim
-    {92, 60, 38},     // 1: Dark ring
-    {130, 88, 56},    // 2: Mid ring
-    {168, 116, 78},   // 3: Sapwood ring
-    {205, 150, 105}   // 4: Pith core
 };
 
 // Embers & Flames (Deep red -> Hot orange -> Bright yellow -> White hot core)
@@ -291,10 +327,9 @@ static Spark g_sparks[MAX_SPARKS];
 static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 static SmokeParticle g_smoke[MAX_SMOKE];
 
-// 3D Logs & Stacking Modes
+// 3D Logs
 static Cylinder3D g_logs[MAX_LOGS];
-static int g_num_logs = 6;
-static int g_stack_mode = 0; // 0: Log Cabin (Fogueira Quadrada), 1: Teepee (Tenda Cônica), 2: Pyramid (Lean-to)
+static int g_num_logs = 5;
 
 // 3D Kindling Twigs & Dry Leaves (Gravetos e Folhas)
 static Twig3D g_twigs[MAX_TWIGS];
@@ -318,13 +353,11 @@ static float g_cycle_duration = 5400.0f; // 90 min (1h30m) real fireplace durati
 static bool g_cycle_logged = false;   // Prevents duplicate history logging
 static float g_time_scale = 1.0f;     // 1.0 = Realtime, 30.0 = Fast Demo
 static bool g_realtime_mode = true;   // Realtime 1.0x vs Fast Demo 30.0x
-static bool g_show_hud = false;       // Relógio / HUD opcional (oculto por padrão)
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
 static float g_wind_turb = 0.0f;
 static float g_collapse_progress = 0.0f;
 static bool g_force_collapse = false;
-static bool g_paused = false;
 
 // PRNG
 static uint32_t g_rng = 0x8542b821;
@@ -738,78 +771,8 @@ static bool intersect_leaf(const Leaf3D *lf, Vec3 ro, Vec3 rd, float *out_t, Vec
 }
 
 // -----------------------------------------------------------------------------
-// STACK GENERATORS: Real physical contact points, resting tiers, and gravity
+// STACK GENERATOR: Tenda Cônica (Teepee)
 // -----------------------------------------------------------------------------
-
-// 1. FOGUEIRA QUADRADA / CABANA DE TRONCOS (Log Cabin / Cribbing)
-static void build_stack_log_cabin(void) {
-    g_num_logs = 6;
-    float ground_y = -4.2f;
-    float span = 3.6f;
-
-    // Tier 1 (Ground along X): 2 logs resting flat on ground with unequal radii and asymmetric cuts
-    float r0 = 1.32f;
-    float y0 = ground_y + r0;
-    init_cylinder(&g_logs[0], 1,
-                  (Vec3){-4.8f, y0, -span - 0.15f}, (Vec3){5.3f, y0, -span + 0.15f},
-                  (Vec3){-4.8f, y0, -span - 0.15f}, (Vec3){5.3f, y0, -span + 0.15f},
-                  r0, 0.25f);
-    g_logs[0].support_log1 = -1;
-    g_logs[0].support_log2 = -1;
-
-    float r1 = 1.18f;
-    float y1 = ground_y + r1;
-    init_cylinder(&g_logs[1], 2,
-                  (Vec3){-5.2f, y1,  span + 0.20f}, (Vec3){4.6f, y1,  span - 0.10f},
-                  (Vec3){-5.2f, y1,  span + 0.20f}, (Vec3){4.6f, y1,  span - 0.10f},
-                  r1, 0.25f);
-    g_logs[1].support_log1 = -1;
-    g_logs[1].support_log2 = -1;
-
-    // Tier 2 (Resting across Tier 1 along Z): 2 logs
-    float r2 = 1.10f;
-    float y2 = ground_y + fmaxf(r0, r1) + r2 - 0.15f;
-    float y2_coll = ground_y + r2;
-    init_cylinder(&g_logs[2], 3,
-                  (Vec3){-span - 0.20f, y2, -5.1f}, (Vec3){-span + 0.15f, y2, 4.7f},
-                  (Vec3){-span - 0.10f, y2_coll, -4.6f}, (Vec3){-span + 0.10f, y2_coll, 4.3f},
-                  r2, 0.35f);
-    g_logs[2].support_log1 = 0; // Supported by log 0
-    g_logs[2].support_log2 = 1; // Supported by log 1
-
-    float r3 = 1.26f;
-    float y3 = ground_y + fmaxf(r0, r1) + r3 - 0.15f;
-    float y3_coll = ground_y + r3;
-    init_cylinder(&g_logs[3], 4,
-                  (Vec3){ span - 0.10f, y3, -4.6f}, (Vec3){ span + 0.25f, y3, 5.3f},
-                  (Vec3){ span - 0.05f, y3_coll, -4.2f}, (Vec3){ span + 0.15f, y3_coll, 4.8f},
-                  r3, 0.35f);
-    g_logs[3].support_log1 = 0; // Supported by log 0
-    g_logs[3].support_log2 = 1; // Supported by log 1
-
-    // Tier 3 (Cross diagonally across top): 2 logs
-    float r4 = 0.92f;
-    float y4 = y2 + r2 + r4 - 0.15f;
-    float y4_coll = ground_y + r4 + 0.35f;
-    init_cylinder(&g_logs[4], 5,
-                  (Vec3){-3.8f, y4, -3.2f}, (Vec3){4.2f, y4, 2.7f},
-                  (Vec3){-2.2f, y4_coll, -1.6f}, (Vec3){2.4f, y4_coll, 1.4f},
-                  r4, 0.50f);
-    g_logs[4].support_log1 = 2; // Supported by Tier 2
-    g_logs[4].support_log2 = 3;
-
-    float r5 = 1.04f;
-    float y5 = y3 + r3 + r5 - 0.15f;
-    float y5_coll = ground_y + r5 + 0.30f;
-    init_cylinder(&g_logs[5], 6,
-                  (Vec3){-4.3f, y5,  2.8f}, (Vec3){3.9f, y5, -3.1f},
-                  (Vec3){-2.4f, y5_coll,  1.5f}, (Vec3){2.2f, y5_coll, -1.6f},
-                  r5, 0.50f);
-    g_logs[5].support_log1 = 2; // Supported by Tier 2
-    g_logs[5].support_log2 = 3;
-}
-
-// 2. TENDA CÔNICA (Teepee / Cone)
 static void build_stack_teepee(void) {
     g_num_logs = 5;
     float ground_y = -4.2f;
@@ -833,61 +796,6 @@ static void build_stack_teepee(void) {
     }
 }
 
-// 3. PIRÂMIDE COM ESCORA (Pyramid / Lean-to)
-static void build_stack_pyramid(void) {
-    g_num_logs = 5;
-    float ground_y = -4.2f;
-    float r_base0 = 1.38f;
-    float r_base1 = 1.26f;
-    float y1_0 = ground_y + r_base0;
-    float y1_1 = ground_y + r_base1;
-
-    // 2 Base logs (slight asymmetry in length and position)
-    init_cylinder(&g_logs[0], 1,
-                  (Vec3){-5.4f, y1_0, -2.4f}, (Vec3){5.6f, y1_0, -2.6f},
-                  (Vec3){-5.4f, y1_0, -2.4f}, (Vec3){5.6f, y1_0, -2.6f},
-                  r_base0, 0.25f);
-    g_logs[0].support_log1 = -1;
-    g_logs[0].support_log2 = -1;
-
-    init_cylinder(&g_logs[1], 2,
-                  (Vec3){-5.6f, y1_1,  2.6f}, (Vec3){5.2f, y1_1,  2.4f},
-                  (Vec3){-5.6f, y1_1,  2.6f}, (Vec3){5.2f, y1_1,  2.4f},
-                  r_base1, 0.25f);
-    g_logs[1].support_log1 = -1;
-    g_logs[1].support_log2 = -1;
-
-    // 3 Leaning logs with distinct thicknesses
-    float y_apex = 2.2f;
-    float r_cross2 = 1.08f;
-    float r_cross3 = 1.15f;
-    float r_cross4 = 1.12f;
-
-    float y_coll2 = ground_y + r_cross2 + 0.2f;
-    init_cylinder(&g_logs[2], 3,
-                  (Vec3){-4.2f, y1_0 + r_base0 - 0.2f, -1.1f}, (Vec3){-0.1f, y_apex + 0.1f, -0.2f},
-                  (Vec3){-3.8f, y_coll2, -0.6f}, (Vec3){-0.1f, y_coll2, -0.1f},
-                  r_cross2, 0.50f);
-    g_logs[2].support_log1 = 0;
-    g_logs[2].support_log2 = -1;
-
-    float y_coll3 = ground_y + r_cross3 + 0.2f;
-    init_cylinder(&g_logs[3], 4,
-                  (Vec3){ 4.3f, y1_0 + r_base0 - 0.2f, -0.9f}, (Vec3){ 0.1f, y_apex, -0.3f},
-                  (Vec3){ 3.9f, y_coll3, -0.6f}, (Vec3){ 0.1f, y_coll3, -0.1f},
-                  r_cross3, 0.50f);
-    g_logs[3].support_log1 = 0;
-    g_logs[3].support_log2 = -1;
-
-    float y_coll4 = ground_y + r_cross4 + 0.2f;
-    init_cylinder(&g_logs[4], 5,
-                  (Vec3){ 0.2f, y1_1 + r_base1 - 0.2f,  3.1f}, (Vec3){ 0.0f, y_apex + 0.15f, 0.4f},
-                  (Vec3){ 0.1f, y_coll4,  2.3f}, (Vec3){ 0.0f, y_coll4,  0.2f},
-                  r_cross4, 0.50f);
-    g_logs[4].support_log1 = 1;
-    g_logs[4].support_log2 = -1;
-}
-
 static void init_scene(void) {
     memset(g_fire_heat, 0, sizeof(g_fire_heat));
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -908,16 +816,13 @@ static void init_scene(void) {
     g_collapse_progress = 0.0f;
     g_force_collapse = false;
 
+    if (g_wood_type < 0 || g_wood_type >= 4) {
+        g_wood_type = rand_range(0, 3);
+    }
+
     build_stone_ring();
     build_kindling();
-
-    if (g_stack_mode == 0) {
-        build_stack_log_cabin();
-    } else if (g_stack_mode == 1) {
-        build_stack_teepee();
-    } else {
-        build_stack_pyramid();
-    }
+    build_stack_teepee();
 }
 
 static bool intersect_sub_cylinder(Vec3 p1, Vec3 p2, float radius, float sag_amount,
@@ -1236,8 +1141,6 @@ static void stoke_fire_add_wood(void) {
 }
 
 static void update_simulation(void) {
-    if (g_paused) return;
-
     // Physical time dimensionalization:
     // Full lifecycle (0 to 3000s) maps directly to g_cycle_duration real seconds
     float rate_mult = (g_cycle_duration > 0.0f) ? (3000.0f / g_cycle_duration) : 1.0f;
@@ -1361,7 +1264,7 @@ static void update_simulation(void) {
                     if (eta_r > 0.05f) {
                         float exo = 0.0016f * (g_logs[i].segments[s].temp - 0.28f) * (0.35f + 0.65f * eta_r) * g_logs[i].segments[s].structural_mass * step_dt;
                         g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + exo);
-                        burn_rate = 0.00035f * (g_logs[i].segments[s].temp - 0.25f) * (0.25f + 0.75f * eta_r) * step_dt;
+                        burn_rate = 0.00035f * (g_logs[i].segments[s].temp - 0.25f) * (0.25f + 0.75f * eta_r) * WOOD_SPECIES[g_wood_type].burn_rate_mult * step_dt;
                         g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
                     } else {
                         burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.25f) * step_dt;
@@ -1418,7 +1321,7 @@ static void update_simulation(void) {
 
                 // 9. Sap Pocket Pops
                 if (g_logs[i].segments[s].temp > 0.45f && g_logs[i].segments[s].burn_progress >= 0.15f && g_logs[i].segments[s].burn_progress <= 0.75f) {
-                    if (rand_f() < (0.015f * step_dt * 40.0f)) {
+                    if (rand_f() < (0.015f * WOOD_SPECIES[g_wood_type].crackle_mult * step_dt * 40.0f)) {
                         int num_sp = rand_range(6, 10);
                         for (int sp = 0; sp < num_sp; sp++) {
                             float angle = rand_f() * 6.28318f;
@@ -1530,8 +1433,9 @@ static void update_simulation(void) {
             if (!g_cycle_logged) {
                 g_cycle_logged = true;
                 int target_min = (int)(g_cycle_duration / 60.0f);
-                const char *mode_str = (g_stack_mode == 0) ? "Quadrada" : ((g_stack_mode == 1) ? "Tenda" : "Pirâmide");
-                log_bonfire_history(target_min, target_min, mode_str, true);
+                char mode_desc[64];
+                snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
+                log_bonfire_history(target_min, target_min, mode_desc, true);
             }
         }
 
@@ -1675,6 +1579,19 @@ static void update_simulation(void) {
             }
 
             recompute_cylinder_axes(&g_logs[i]);
+        }
+    }
+
+    // Post-extinction thin delicate wispy smoke drifting from cool ash bed
+    if (g_sim_time >= 3000.0f && g_sim_time < 3350.0f) {
+        if (rand_f() < 0.12f) {
+            Vec3 ash_c = (Vec3){(rand_f() - 0.5f) * 1.5f, -4.1f, (rand_f() - 0.5f) * 1.5f};
+            Vec3 smk_v = (Vec3){
+                (rand_f() - 0.5f) * 0.25f + g_wind_turb * 0.35f,
+                rand_f() * 0.8f + 0.5f,
+                (rand_f() - 0.5f) * 0.25f
+            };
+            spawn_smoke_3d(ash_c, smk_v, 0.22f, 3.2f, 1);
         }
     }
 
@@ -1907,10 +1824,18 @@ static void render_scene(void) {
     float world_w = 22.0f;
     float world_h = 14.0f;
 
-    // Fire point light positioned in the hearth core
-    float flicker = 1.0f + 0.16f * sinf(g_anim_time * 8.0f) + 0.10f * cosf(g_anim_time * 13.0f);
+    // Fire point light positioned in the hearth core with organic flicker
+    float fire_activity = fmaxf(g_ash_bed.heat, 0.0f);
+    for (int i = 0; i < g_num_logs; i++) {
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            if (g_logs[i].segments[s].temp > 0.25f && g_logs[i].segments[s].moisture <= 0.05f) {
+                fire_activity = fmaxf(fire_activity, g_logs[i].segments[s].temp);
+            }
+        }
+    }
+    float flicker = (1.0f + 0.22f * sinf(g_anim_time * 8.5f + sinf(g_anim_time * 17.0f)) + 0.14f * cosf(g_anim_time * 12.0f)) * fire_activity;
     Vec3 light_pos = (Vec3){0.0f, -1.8f, 0.0f};
-    float light_intensity = 1.9f * flicker;
+    float light_intensity = 2.2f * flicker;
 
     // =========================================================================
     // 1. 3D Raycasting with Stones and Segmented Wood
@@ -2610,24 +2535,10 @@ static void present_frame(void) {
     int rem_min = (int)(rem_sec_total / 60.0f);
     int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
-    const char *stage_name = "1/7: Gravetos e Secagem";
-    if (g_sim_time >= 3000.0f) stage_name = "Ciclo Concluído (Apagada)";
-    else if (g_sim_time > 2700.0f) stage_name = "7/7: Cinzas e Resfriamento";
-    else if (g_sim_time > 2100.0f) stage_name = "6/7: Leito de Brasas";
-    else if (g_sim_time > 1600.0f) stage_name = "5/7: Fratura Estrutural e Colapso";
-    else if (g_sim_time > 1100.0f) stage_name = "4/7: Incandescência e Deformação";
-    else if (g_sim_time > 360.0f) stage_name = "3/7: Fogueira Roaring";
-    else if (g_sim_time > 120.0f) stage_name = "2/7: Ignição e Pirólise";
-
-    const char *mode_name = "1: Empilhada (Quadrada)";
-    if (g_stack_mode == 1) mode_name = "2: Tenda Cônica";
-    else if (g_stack_mode == 2) mode_name = "3: Pirâmide";
-
-    if (g_show_hud) {
-        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;33m[3D Lareira]\033[0m %02d:%02d / %02d:00 (Restante: %02d:%02d) [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [I] Relógio [1/2/3/P] Pilha [F] Lenha [+/-] Vel [Q] Sair ",
-            el_min, el_sec, tot_min, rem_min, rem_sec, g_realtime_mode ? "Real" : "Fast", g_time_scale, mode_name, stage_name);
-    }
+    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+        "\033[1;33m[Lareira 3D]\033[0m Tempo Ativo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [Q] Sair ",
+        el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
+        g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
 
     if (buf_len > 0) {
         safe_write(STDOUT_FILENO, buf, buf_len);
@@ -2664,47 +2575,14 @@ static void handle_input(void) {
         } else if (ch == 's' || ch == 'S' || ch == 'j') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+        } else if (ch == 'g' || ch == 'G' || ch == 't' || ch == 'T' || ch == ' ') {
+            g_auto_turntable = !g_auto_turntable;
         } else if (ch == 'f' || ch == 'F') {
             stoke_fire_add_wood();
-        } else if (ch == 'p' || ch == 'P' || ch == 'm' || ch == 'M') {
-            g_stack_mode = (g_stack_mode + 1) % 3;
-            init_scene();
-        } else if (ch == '1') {
-            g_stack_mode = 0;
-            init_scene();
-        } else if (ch == '2') {
-            g_stack_mode = 1;
-            init_scene();
-        } else if (ch == '3') {
-            g_stack_mode = 2;
-            init_scene();
-        } else if (ch == 'x' || ch == 'X') {
-            g_realtime_mode = !g_realtime_mode;
-            g_time_scale = g_realtime_mode ? 1.0f : 30.0f;
-        } else if (ch == 'i' || ch == 'I') {
-            g_show_hud = !g_show_hud;
-        } else if (ch == 't' || ch == 'T') {
-            g_auto_turntable = !g_auto_turntable;
-        } else if (ch == '0' || ch == 'z' || ch == 'Z') {
-            g_cam_yaw = 0.40f;
-            g_cam_pitch = 0.35f;
-            g_auto_turntable = false;
-        } else if (ch == 'q' || ch == 'Q') {
-            g_running = 0;
         } else if (ch == 'r' || ch == 'R') {
             init_scene();
-        } else if (ch == 'c' || ch == 'C') {
-            g_force_collapse = true;
-        } else if (ch == ' ') {
-            g_paused = !g_paused;
-        } else if (ch == '+' || ch == '=') {
-            g_time_scale += (g_time_scale < 5.0f) ? 1.0f : 5.0f;
-            if (g_time_scale > 60.0f) g_time_scale = 60.0f;
-            g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
-        } else if (ch == '-' || ch == '_') {
-            g_time_scale -= (g_time_scale <= 5.0f) ? 1.0f : 5.0f;
-            if (g_time_scale < 0.2f) g_time_scale = 0.2f;
-            g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
+        } else if (ch == 'q' || ch == 'Q') {
+            g_running = 0;
         }
     }
 }
@@ -2714,22 +2592,16 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
             print_bonfire_history();
             return 0;
-        } else if (strcmp(argv[i], "--hud") == 0 || strcmp(argv[i], "-i") == 0) {
-            g_show_hud = true;
-        } else if (strcmp(argv[i], "--realtime") == 0) {
-            g_realtime_mode = true;
-            g_time_scale = 1.0f;
         } else if (strcmp(argv[i], "--fast") == 0) {
             g_realtime_mode = false;
             g_time_scale = 30.0f;
-        } else if (strcmp(argv[i], "--empilhada") == 0 || strcmp(argv[i], "--quadrada") == 0 || strcmp(argv[i], "--cabin") == 0) {
-            g_stack_mode = 0;
-        } else if (strcmp(argv[i], "--tenda") == 0 || strcmp(argv[i], "--teepee") == 0) {
-            g_stack_mode = 1;
-        } else if (strcmp(argv[i], "--piramide") == 0 || strcmp(argv[i], "--pyramid") == 0) {
-            g_stack_mode = 2;
-        } else if ((strcmp(argv[i], "--stack") == 0 || strcmp(argv[i], "-s") == 0 || strcmp(argv[i], "--pilha") == 0) && i + 1 < argc) {
-            g_stack_mode = atoi(argv[++i]) % 3;
+        } else if ((strcmp(argv[i], "--wood") == 0 || strcmp(argv[i], "-w") == 0 || strcmp(argv[i], "--madeira") == 0) && i + 1 < argc) {
+            const char *w = argv[++i];
+            if (strcasecmp(w, "carvalho") == 0 || strcasecmp(w, "oak") == 0) g_wood_type = 0;
+            else if (strcasecmp(w, "pinho") == 0 || strcasecmp(w, "pine") == 0) g_wood_type = 1;
+            else if (strcasecmp(w, "betula") == 0 || strcasecmp(w, "birch") == 0) g_wood_type = 2;
+            else if (strcasecmp(w, "cerejeira") == 0 || strcasecmp(w, "cherry") == 0) g_wood_type = 3;
+            else g_wood_type = atoi(w) % 4;
         } else if ((strcmp(argv[i], "--time") == 0 || strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--pomodoro") == 0) && i + 1 < argc) {
             float mins = (float)atof(argv[++i]);
             if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
@@ -2745,7 +2617,6 @@ int main(int argc, char **argv) {
     if (argc > 2 && strcmp(argv[1], "--snapshot") == 0) {
         g_pixel_w = 120;
         g_pixel_h = 70;
-        if (argc > 6) g_stack_mode = atoi(argv[6]);
         init_scene();
         float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
@@ -2798,8 +2669,9 @@ int main(int argc, char **argv) {
         int el_min = (int)(elapsed_sec / 60.0f);
         int target_min = (int)(g_cycle_duration / 60.0f);
         if (el_min >= 1) {
-            const char *mode_str = (g_stack_mode == 0) ? "Quadrada" : ((g_stack_mode == 1) ? "Tenda" : "Pirâmide");
-            log_bonfire_history(target_min, el_min, mode_str, false);
+            char mode_desc[64];
+            snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
+            log_bonfire_history(target_min, el_min, mode_desc, false);
         }
     }
 
