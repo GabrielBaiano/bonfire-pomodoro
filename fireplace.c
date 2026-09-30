@@ -964,13 +964,13 @@ static void build_dark_souls_scene(void) {
     Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
     Vec3 w2 = vec3_cross(u, w1);
 
-    float blade_len = 6.8f;
+    float blade_len = 8.0f;
     Vec3 prev_p = g_sword.root_pos;
     for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
         float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
-        float radius = 0.44f - 0.12f * (s / blade_len);
-        float phase = s * 2.6f + 0.35f;
-        float amp = 0.38f * (1.0f - 0.15f * (s / blade_len));
+        float radius = 0.40f - 0.12f * (s / blade_len);
+        float phase = s * 2.4f + 0.35f;
+        float amp = 0.38f * (1.0f - 0.12f * (s / blade_len));
         Vec3 spiral_offset = vec3_add(vec3_scale(w1, amp * sinf(phase)), vec3_scale(w2, amp * cosf(phase)));
         Vec3 curr_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), spiral_offset));
 
@@ -978,7 +978,7 @@ static void build_dark_souls_scene(void) {
         g_sword.blade_segs[i].p2 = curr_p;
         g_sword.blade_segs[i].radius = radius;
         // Thermal incandescence climbs the coiled sword (intense ember gradient)
-        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (5.4f - s) / 4.4f));
+        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f));
         prev_p = curr_p;
     }
 
@@ -2308,11 +2308,11 @@ static void update_simulation(void) {
         // Sustain constant mystical bonfire flame activity
         g_ash_bed.heat = 1.0f;
 
-        // Update blade heat along the twisted blade
-        float blade_len = 6.8f;
+        // Update blade heat along the taller twisted blade
+        float blade_len = 8.0f;
         for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
             float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
-            g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (5.4f - s) / 4.4f)) * g_ash_bed.heat;
+            g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f)) * g_ash_bed.heat;
         }
 
         // Swirling embers & sparks climbing up the coiled bronze sword blade
@@ -2321,10 +2321,10 @@ static void update_simulation(void) {
         Vec3 w2 = vec3_cross(u, w1);
 
         for (int e = 0; e < 3; e++) {
-            if (rand_f() < 0.70f) {
-                float s = rand_f() * 6.2f;
-                float phase = s * 2.6f + g_anim_time * 6.0f + (float)e * 2.1f;
-                float spiral_r = 0.38f * (1.0f - 0.12f * (s / 6.2f));
+            if (rand_f() < 0.75f) {
+                float s = rand_f() * 7.4f;
+                float phase = s * 2.4f + g_anim_time * 6.0f + (float)e * 2.1f;
+                float spiral_r = 0.38f * (1.0f - 0.12f * (s / 7.4f));
                 Vec3 offset = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)), vec3_scale(w2, spiral_r * cosf(phase)));
                 Vec3 sp_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), offset));
                 Vec3 sp_v = (Vec3){
@@ -2379,8 +2379,8 @@ static void update_simulation(void) {
     // -------------------------------------------------------------------------
     // STRICT FIRE PROJECTION: Heat originates strictly from burning wood & kindling
     // -------------------------------------------------------------------------
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? -0.8f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 20.0f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 0.70f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 22.0f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2391,8 +2391,8 @@ static void update_simulation(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 14.5f : 22.0f;
-    float world_h = g_is_dark_souls ? 10.0f : 14.0f;
+    float world_w = g_is_dark_souls ? 16.5f : 22.0f;
+    float world_h = g_is_dark_souls ? 12.2f : 14.0f;
 
     // Reset next fire frame and depth buffer
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -2432,7 +2432,7 @@ static void update_simulation(void) {
         Vec3 u = g_sword.axis;
         Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
         Vec3 w2 = vec3_cross(u, w1);
-        float flame_reach = 6.4f; // reaches up to quillon & guard
+        float flame_reach = 7.6f; // reaches up to quillon & guard
 
         for (float s = 0.06f; s <= flame_reach; s += 0.08f) {
             float t_norm = s / flame_reach;
@@ -2683,8 +2683,8 @@ static void render_scene(void) {
     }
 
     // Compute Camera Vectors
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? -0.8f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 20.0f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 0.70f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 22.0f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2695,8 +2695,8 @@ static void render_scene(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 14.5f : 22.0f;
-    float world_h = g_is_dark_souls ? 10.0f : 14.0f;
+    float world_w = g_is_dark_souls ? 16.5f : 22.0f;
+    float world_h = g_is_dark_souls ? 12.2f : 14.0f;
 
     // Fire point light positioned in the hearth core with organic flicker
     float fire_activity = fmaxf(g_ash_bed.heat, 0.0f);
