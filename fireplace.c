@@ -28,6 +28,7 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <signal.h>
+#include <sys/stat.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -313,9 +314,11 @@ static bool g_auto_turntable = false; // Auto 360 degree turntable rotation
 // Simulation dynamics (Physically dimensionalized in real seconds)
 static float g_sim_time = 0.0f;       // Physical simulated time in seconds
 static float g_anim_time = 0.0f;      // Display animation time (flicker, ash drift)
+static float g_cycle_duration = 5400.0f; // 90 min (1h30m) real fireplace duration by default
+static bool g_cycle_logged = false;   // Prevents duplicate history logging
 static float g_time_scale = 1.0f;     // 1.0 = Realtime, 30.0 = Fast Demo
 static bool g_realtime_mode = true;   // Realtime 1.0x vs Fast Demo 30.0x
-static bool g_show_hud = true;        // Display status header and physical clock
+static bool g_show_hud = false;       // Relógio / HUD opcional (oculto por padrão)
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
 static float g_wind_turb = 0.0f;
@@ -493,6 +496,57 @@ static void build_kindling(void) {
     init_leaf(&g_leaves[2], OBJ_LEAF_BASE + 2, (Vec3){ 1.0f, -3.40f, -0.55f}, (Vec3){ 0.4f, 0.8f, -0.3f}, 0.25f, 0.42f);
     init_leaf(&g_leaves[3], OBJ_LEAF_BASE + 3, (Vec3){-0.3f, -3.60f,  0.65f}, (Vec3){-0.2f, 0.9f,  0.3f}, 0.24f, 0.38f);
     init_leaf(&g_leaves[4], OBJ_LEAF_BASE + 4, (Vec3){ 0.1f, -3.25f, -0.25f}, (Vec3){ 0.1f, 0.9f, -0.2f}, 0.26f, 0.40f);
+}
+
+static void get_history_file_path(char *path, size_t max_len) {
+    const char *home = getenv("HOME");
+    if (home) {
+        char dir[512];
+        snprintf(dir, sizeof(dir), "%s/.config", home);
+        mkdir(dir, 0755);
+        snprintf(dir, sizeof(dir), "%s/.config/bonfire", home);
+        mkdir(dir, 0755);
+        snprintf(path, max_len, "%s/.config/bonfire/history.log", home);
+    } else {
+        snprintf(path, max_len, "bonfires.log");
+    }
+}
+
+static void log_bonfire_history(int minutes_target, int minutes_burned, const char *mode, bool completed) {
+    char path[512];
+    get_history_file_path(path, sizeof(path));
+    FILE *f = fopen(path, "a");
+    if (!f) f = fopen("bonfires.log", "a");
+    if (f) {
+        time_t now = time(NULL);
+        struct tm *t = localtime(&now);
+        char date_str[64];
+        strftime(date_str, sizeof(date_str), "%Y-%m-%d %H:%M", t);
+        fprintf(f, "[%s] %d min (Planejado: %d min) | Pilha: %s | %s\n",
+                date_str, minutes_burned, minutes_target, mode,
+                completed ? "Concluída 🔥" : "Interrompida 💨");
+        fclose(f);
+    }
+}
+
+static void print_bonfire_history(void) {
+    char path[512];
+    get_history_file_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) f = fopen("bonfires.log", "r");
+    if (!f) {
+        printf("Nenhuma fogueira registrada no histórico ainda.\n");
+        return;
+    }
+    printf("\033[1;33m=== Histórico de Fogueiras ===\033[0m\n\n");
+    char line[256];
+    int count = 0;
+    while (fgets(line, sizeof(line), f)) {
+        printf("  %s", line);
+        count++;
+    }
+    printf("\nTotal: %d fogueiras salvas no histórico.\n", count);
+    fclose(f);
 }
 
 static void safe_write(int fd, const void *buf, size_t count) {
@@ -1185,9 +1239,9 @@ static void update_simulation(void) {
     if (g_paused) return;
 
     // Physical time dimensionalization:
-    // dt_frame = 0.025s (approx 40 FPS real terminal display)
-    // Physical simulation step dt = 0.025s * g_time_scale
-    float dt = 0.025f * g_time_scale;
+    // Full lifecycle (0 to 3000s) maps directly to g_cycle_duration real seconds
+    float rate_mult = (g_cycle_duration > 0.0f) ? (3000.0f / g_cycle_duration) : 1.0f;
+    float dt = 0.025f * g_time_scale * rate_mult;
     g_sim_time += dt;
     g_anim_time += 0.025f;
 
@@ -1342,9 +1396,17 @@ static void update_simulation(void) {
                     }
                 }
 
-                // Fuel depletion
-                if (g_logs[i].segments[s].burn_progress > 0.85f) {
-                    g_logs[i].segments[s].temp = fmaxf(0.10f, g_logs[i].segments[s].temp - 0.00015f * step_dt);
+                // Fuel depletion & terminal cooling
+                if (g_logs[i].segments[s].burn_progress > 0.85f || cur_sim_t > 2400.0f) {
+                    float cool_rate = (cur_sim_t > 2700.0f) ? 0.0030f : 0.0008f;
+                    g_logs[i].segments[s].temp = fmaxf(0.0f, g_logs[i].segments[s].temp - cool_rate * step_dt);
+                }
+                if (g_logs[i].segments[s].structural_mass <= 0.02f) {
+                    g_logs[i].segments[s].temp = fmaxf(0.0f, g_logs[i].segments[s].temp - 0.0020f * step_dt);
+                }
+                if (cur_sim_t >= 3000.0f) {
+                    g_logs[i].segments[s].temp = 0.0f;
+                    g_logs[i].segments[s].glow_intensity = 0.0f;
                 }
                 if (g_logs[i].segments[s].temp < 0.0f) g_logs[i].segments[s].temp = 0.0f;
 
@@ -1460,7 +1522,17 @@ static void update_simulation(void) {
         if (active_burning_segs > 0) {
             g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.0005f * step_dt * 40.0f);
         } else if (cur_sim_t > 180.0f) {
-            g_ash_bed.heat = fmaxf(0.12f, g_ash_bed.heat - 0.0001f * step_dt * 40.0f);
+            float cool_floor = (cur_sim_t > 2700.0f) ? fmaxf(0.0f, 0.12f * (1.0f - (cur_sim_t - 2700.0f) / 300.0f)) : 0.12f;
+            g_ash_bed.heat = fmaxf(cool_floor, g_ash_bed.heat - 0.0002f * step_dt * 40.0f);
+        }
+        if (cur_sim_t >= 3000.0f) {
+            g_ash_bed.heat = 0.0f;
+            if (!g_cycle_logged) {
+                g_cycle_logged = true;
+                int target_min = (int)(g_cycle_duration / 60.0f);
+                const char *mode_str = (g_stack_mode == 0) ? "Quadrada" : ((g_stack_mode == 1) ? "Tenda" : "Pirâmide");
+                log_bonfire_history(target_min, target_min, mode_str, true);
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -1754,7 +1826,7 @@ static void update_simulation(void) {
     }
 
     // 4. Sparks Ejection from burning wood
-    if (rand_f() < 0.65f) {
+    if (g_sim_time < 2900.0f && rand_f() < 0.65f) {
         for (int i = 0; i < g_num_logs; i++) {
             int s = rand_range(0, NUM_LOG_SEGS - 1);
             if (g_logs[i].segments[s].temp > 0.50f) {
@@ -1765,6 +1837,11 @@ static void update_simulation(void) {
                 break;
             }
         }
+    }
+
+    if (g_sim_time >= 3000.0f) {
+        memset(g_fire_heat, 0, sizeof(g_fire_heat));
+        for (int i = 0; i < MAX_SPARKS; i++) g_sparks[i].active = false;
     }
 
     for (int i = 0; i < MAX_SPARKS; i++) {
@@ -2525,13 +2602,17 @@ static void present_frame(void) {
         prev_bg_transp = true;
     }
 
-    int total_sec = (int)g_sim_time;
-    int hrs = total_sec / 3600;
-    int mins = (total_sec % 3600) / 60;
-    int secs = total_sec % 60;
+    float elapsed_sec = fminf(g_cycle_duration, g_sim_time * (g_cycle_duration / 3000.0f));
+    int el_min = (int)(elapsed_sec / 60.0f);
+    int el_sec = (int)fmodf(elapsed_sec, 60.0f);
+    int tot_min = (int)(g_cycle_duration / 60.0f);
+    float rem_sec_total = fmaxf(0.0f, g_cycle_duration - elapsed_sec);
+    int rem_min = (int)(rem_sec_total / 60.0f);
+    int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
     const char *stage_name = "1/7: Gravetos e Secagem";
-    if (g_sim_time > 2700.0f) stage_name = "7/7: Cinzas e Resfriamento";
+    if (g_sim_time >= 3000.0f) stage_name = "Ciclo Concluído (Apagada)";
+    else if (g_sim_time > 2700.0f) stage_name = "7/7: Cinzas e Resfriamento";
     else if (g_sim_time > 2100.0f) stage_name = "6/7: Leito de Brasas";
     else if (g_sim_time > 1600.0f) stage_name = "5/7: Fratura Estrutural e Colapso";
     else if (g_sim_time > 1100.0f) stage_name = "4/7: Incandescência e Deformação";
@@ -2544,8 +2625,8 @@ static void present_frame(void) {
 
     if (g_show_hud) {
         buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [F] Lenha [L] Pilha [+/-] Vel [C] Colapso [T] Órbita [Q] Sair ",
-            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name);
+            "\033[1;33m[3D Lareira]\033[0m %02d:%02d / %02d:00 (Restante: %02d:%02d) [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [I] Relógio [F] Lenha [+/-] Vel [Q] Sair ",
+            el_min, el_sec, tot_min, rem_min, rem_sec, g_realtime_mode ? "Real" : "Fast", g_time_scale, mode_name, stage_name);
     }
 
     if (buf_len > 0) {
@@ -2585,7 +2666,7 @@ static void handle_input(void) {
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'f' || ch == 'F') {
             stoke_fire_add_wood();
-        } else if (ch == 'l' || ch == 'L') {
+        } else if (ch == 'p' || ch == 'P') {
             g_stack_mode = (g_stack_mode + 1) % 3;
             init_scene();
         } else if (ch == 'x' || ch == 'X') {
@@ -2621,15 +2702,26 @@ static void handle_input(void) {
 
 int main(int argc, char **argv) {
     for (int i = 1; i < argc; i++) {
-        if (strcmp(argv[i], "--realtime") == 0) {
+        if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
+            print_bonfire_history();
+            return 0;
+        } else if (strcmp(argv[i], "--hud") == 0 || strcmp(argv[i], "-i") == 0) {
+            g_show_hud = true;
+        } else if (strcmp(argv[i], "--realtime") == 0) {
             g_realtime_mode = true;
             g_time_scale = 1.0f;
         } else if (strcmp(argv[i], "--fast") == 0) {
             g_realtime_mode = false;
             g_time_scale = 30.0f;
+        } else if ((strcmp(argv[i], "--time") == 0 || strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--pomodoro") == 0) && i + 1 < argc) {
+            float mins = (float)atof(argv[++i]);
+            if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
         } else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
             g_time_scale = (float)atof(argv[++i]);
             g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
+        } else if (argv[i][0] >= '0' && argv[i][0] <= '9' && strstr(argv[i], ".ppm") == NULL) {
+            float mins = (float)atof(argv[i]);
+            if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
         }
     }
 
@@ -2681,6 +2773,17 @@ int main(int argc, char **argv) {
         ts.tv_sec = 0;
         ts.tv_nsec = 24000000L; // ~40 FPS
         nanosleep(&ts, NULL);
+    }
+
+    // Save history if closed prematurely after at least 1 minute
+    if (!g_cycle_logged) {
+        float elapsed_sec = fminf(g_cycle_duration, g_sim_time * (g_cycle_duration / 3000.0f));
+        int el_min = (int)(elapsed_sec / 60.0f);
+        int target_min = (int)(g_cycle_duration / 60.0f);
+        if (el_min >= 1) {
+            const char *mode_str = (g_stack_mode == 0) ? "Quadrada" : ((g_stack_mode == 1) ? "Tenda" : "Pirâmide");
+            log_bonfire_history(target_min, el_min, mode_str, false);
+        }
     }
 
     return 0;
