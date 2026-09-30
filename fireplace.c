@@ -182,9 +182,46 @@ static const RGB PALETTE_SOOT_PUFF[] = {
     {46, 42, 42}      // 2: Ash puff
 };
 
+static const RGB PALETTE_IRON[] = {
+    {22, 20, 19},     // 0: Deep forged shadow
+    {38, 35, 33},     // 1: Dark weathered iron
+    {62, 58, 55},     // 2: Mid forged steel
+    {95, 90, 85},     // 3: Highlighted iron edge
+    {155, 148, 140}   // 4: Specular gleam
+};
+
+static const RGB PALETTE_BONE[] = {
+    {70, 65, 55},     // 0: Scorched bone
+    {110, 102, 90},   // 1: Charred calcified bone
+    {155, 148, 135},  // 2: Weathered bone
+    {195, 188, 175},  // 3: Light bleached bone
+    {230, 224, 212}   // 4: Highlight bone
+};
+
 typedef struct {
     float x, y, z;
 } Vec3;
+
+#define NUM_SWORD_BLADE_SEGS 20
+#define OBJ_SWORD 800
+
+typedef struct {
+    Vec3 p1, p2;
+    float radius;
+    float heat;
+} SwordBladeSegment;
+
+typedef struct {
+    int obj_id;
+    bool active;
+    Vec3 root_pos;
+    Vec3 axis;
+    Vec3 guard_pos;
+    Vec3 guard_p1, guard_p2;
+    Vec3 quillon_p1, quillon_p2;
+    Vec3 pommel_pos;
+    SwordBladeSegment blade_segs[NUM_SWORD_BLADE_SEGS];
+} Sword3D;
 
 typedef struct {
     float temp;            // Thermal state [0.0 = 20C ambient, 1.0 = 900C peak]
@@ -340,6 +377,10 @@ static SmokeParticle g_smoke[MAX_SMOKE];
 // 3D Logs
 static Cylinder3D g_logs[MAX_LOGS];
 static int g_num_logs = 5;
+
+// Dark Souls Coiled Sword (Espada Espiral)
+static bool g_is_dark_souls = false;
+static Sword3D g_sword;
 
 // 3D Kindling Twigs & Dry Leaves (Gravetos e Folhas)
 static Twig3D g_twigs[MAX_TWIGS];
@@ -818,6 +859,71 @@ static void build_stack_teepee(void) {
     }
 }
 
+static void build_dark_souls_scene(void) {
+    build_stone_ring();
+
+    // 1. Coiled Sword (Espada Espiral)
+    g_sword.obj_id = OBJ_SWORD;
+    g_sword.active = true;
+    g_sword.root_pos = (Vec3){0.08f, -4.20f, -0.05f};
+    g_sword.axis = vec3_norm((Vec3){0.26f, 0.95f, -0.14f});
+
+    Vec3 u = g_sword.axis;
+    Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
+    Vec3 w2 = vec3_cross(u, w1);
+
+    float blade_len = 6.8f;
+    Vec3 prev_p = g_sword.root_pos;
+    for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
+        float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
+        float radius = 0.36f - 0.12f * (s / blade_len);
+        float phase = s * 2.4f + 0.35f;
+        float amp = 0.35f * (1.0f - 0.20f * (s / blade_len));
+        Vec3 spiral_offset = vec3_add(vec3_scale(w1, amp * sinf(phase)), vec3_scale(w2, amp * cosf(phase)));
+        Vec3 curr_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), spiral_offset));
+
+        g_sword.blade_segs[i].p1 = prev_p;
+        g_sword.blade_segs[i].p2 = curr_p;
+        g_sword.blade_segs[i].radius = radius;
+        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (3.8f - s) / 3.0f));
+        prev_p = curr_p;
+    }
+
+    g_sword.guard_pos = vec3_add(g_sword.root_pos, vec3_scale(u, blade_len));
+    g_sword.guard_p1 = vec3_sub(g_sword.guard_pos, vec3_scale(w1, 1.15f));
+    g_sword.guard_p2 = vec3_add(g_sword.guard_pos, vec3_scale(w1, 1.15f));
+    g_sword.quillon_p1 = vec3_add(g_sword.guard_p1, vec3_add(vec3_scale(u, -0.38f), vec3_scale(w1, -0.16f)));
+    g_sword.quillon_p2 = vec3_add(g_sword.guard_p2, vec3_add(vec3_scale(u, -0.38f), vec3_scale(w1, 0.16f)));
+
+    g_sword.pommel_pos = vec3_add(g_sword.guard_pos, vec3_scale(u, 1.65f));
+
+    // 2. Base logs & charred bones in circular mound
+    g_num_logs = 4;
+    for (int i = 0; i < g_num_logs; i++) {
+        float angle = (float)i * 2.0f * (float)M_PI / (float)g_num_logs + 0.35f;
+        float r_base = 2.5f;
+        float r_core = 0.55f;
+        Vec3 p1 = (Vec3){ r_base * cosf(angle), -4.10f, r_base * sinf(angle) };
+        Vec3 p2 = (Vec3){ r_core * cosf(angle + 2.2f), -3.65f, r_core * sinf(angle + 2.2f) };
+        init_cylinder(&g_logs[i], i + 1, p1, p2, p1, (Vec3){0.0f, -4.10f, 0.0f}, 0.70f, 0.45f);
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            g_logs[i].segments[s].burn_progress = 0.55f;
+            g_logs[i].segments[s].temp = 0.65f;
+            g_logs[i].segments[s].structural_mass = 0.60f;
+            g_logs[i].segments[s].moisture = 0.0f;
+            g_logs[i].segments[s].glow_intensity = 0.70f;
+        }
+    }
+
+    // 3. Kindling bones / twigs
+    build_kindling();
+    for (int i = 0; i < g_num_twigs; i++) {
+        g_twigs[i].temp = 0.75f;
+        g_twigs[i].burn_progress = 0.45f;
+        g_twigs[i].moisture = 0.0f;
+    }
+}
+
 static void init_scene(void) {
     memset(g_fire_heat, 0, sizeof(g_fire_heat));
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -842,9 +948,194 @@ static void init_scene(void) {
         g_wood_type = rand_range(0, 3);
     }
 
-    build_stone_ring();
-    build_kindling();
-    build_stack_teepee();
+    if (g_is_dark_souls) {
+        build_dark_souls_scene();
+    } else {
+        build_stone_ring();
+        build_kindling();
+        build_stack_teepee();
+    }
+}
+
+static bool intersect_capsule(Vec3 p1, Vec3 p2, float radius, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+    Vec3 d = vec3_sub(p2, p1);
+    float len = vec3_len(d);
+    if (len < 1e-4f) {
+        Vec3 oc = vec3_sub(ro, p1);
+        float b = vec3_dot(oc, rd);
+        float c = vec3_dot(oc, oc) - radius * radius;
+        float disc = b * b - c;
+        if (disc < 0.0f) return false;
+        float sdisc = sqrtf(disc);
+        float t = -b - sdisc;
+        if (t < 0.1f) t = -b + sdisc;
+        if (t < 0.1f) return false;
+        *out_t = t;
+        *out_pt = vec3_add(ro, vec3_scale(rd, t));
+        *out_norm = vec3_norm(vec3_sub(*out_pt, p1));
+        return true;
+    }
+    Vec3 dir = vec3_scale(d, 1.0f / len);
+    Vec3 rc = vec3_sub(ro, p1);
+    Vec3 d_proj = vec3_sub(rd, vec3_scale(dir, vec3_dot(rd, dir)));
+    Vec3 rc_proj = vec3_sub(rc, vec3_scale(dir, vec3_dot(rc, dir)));
+    float a = vec3_dot(d_proj, d_proj);
+    float b = 2.0f * vec3_dot(d_proj, rc_proj);
+    float c = vec3_dot(rc_proj, rc_proj) - radius * radius;
+    float best_t = 1e9f;
+    bool hit = false;
+    Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
+
+    if (a > 1e-6f) {
+        float disc = b * b - 4.0f * a * c;
+        if (disc >= 0.0f) {
+            float sdisc = sqrtf(disc);
+            float t0 = (-b - sdisc) / (2.0f * a);
+            float t1 = (-b + sdisc) / (2.0f * a);
+            float t = (t0 > 0.1f) ? t0 : t1;
+            if (t > 0.1f) {
+                Vec3 pt = vec3_add(ro, vec3_scale(rd, t));
+                float h = vec3_dot(vec3_sub(pt, p1), dir);
+                if (h >= 0.0f && h <= len) {
+                    best_t = t;
+                    best_pt = pt;
+                    Vec3 ax = vec3_add(p1, vec3_scale(dir, h));
+                    best_norm = vec3_norm(vec3_sub(pt, ax));
+                    hit = true;
+                }
+            }
+        }
+    }
+    for (int cap = 0; cap < 2; cap++) {
+        Vec3 cp = cap ? p2 : p1;
+        Vec3 oc = vec3_sub(ro, cp);
+        float b2 = vec3_dot(oc, rd);
+        float c2 = vec3_dot(oc, oc) - radius * radius;
+        float disc2 = b2 * b2 - c2;
+        if (disc2 >= 0.0f) {
+            float sdisc2 = sqrtf(disc2);
+            float t0 = -b2 - sdisc2;
+            float t1 = -b2 + sdisc2;
+            float t = (t0 > 0.1f) ? t0 : t1;
+            if (t > 0.1f && t < best_t) {
+                best_t = t;
+                best_pt = vec3_add(ro, vec3_scale(rd, t));
+                best_norm = vec3_norm(vec3_sub(best_pt, cp));
+                hit = true;
+            }
+        }
+    }
+    if (hit) {
+        *out_t = best_t;
+        *out_pt = best_pt;
+        *out_norm = best_norm;
+        return true;
+    }
+    return false;
+}
+
+static bool intersect_sword(const Sword3D *sw, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm, float *out_heat, int *out_part) {
+    if (!sw->active) return false;
+    float best_t = 1e9f;
+    bool hit = false;
+    Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
+    float best_heat = 0.0f;
+    int best_part = 0;
+
+    // 1. Undulating blade segments
+    for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
+        float t;
+        Vec3 pt, norm;
+        if (intersect_capsule(sw->blade_segs[i].p1, sw->blade_segs[i].p2, sw->blade_segs[i].radius, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = sw->blade_segs[i].heat;
+                best_part = 0;
+                hit = true;
+            }
+        }
+    }
+
+    // 2. Crossguard and Quillons
+    {
+        float t;
+        Vec3 pt, norm;
+        if (intersect_capsule(sw->guard_p1, sw->guard_p2, 0.20f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = 0.0f;
+                best_part = 1;
+                hit = true;
+            }
+        }
+        if (intersect_capsule(sw->guard_p1, sw->quillon_p1, 0.16f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = 0.0f;
+                best_part = 1;
+                hit = true;
+            }
+        }
+        if (intersect_capsule(sw->guard_p2, sw->quillon_p2, 0.16f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = 0.0f;
+                best_part = 1;
+                hit = true;
+            }
+        }
+    }
+
+    // 3. Grip / Hilt
+    {
+        float t;
+        Vec3 pt, norm;
+        if (intersect_capsule(sw->guard_pos, sw->pommel_pos, 0.16f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = 0.0f;
+                best_part = 2;
+                hit = true;
+            }
+        }
+    }
+
+    // 4. Pommel
+    {
+        float t;
+        Vec3 pt, norm;
+        Vec3 pommel_top = vec3_add(sw->pommel_pos, vec3_scale(sw->axis, 0.35f));
+        if (intersect_capsule(sw->pommel_pos, pommel_top, 0.28f, ro, rd, &t, &pt, &norm)) {
+            if (t < best_t) {
+                best_t = t;
+                best_pt = pt;
+                best_norm = norm;
+                best_heat = 0.0f;
+                best_part = 3;
+                hit = true;
+            }
+        }
+    }
+
+    if (hit) {
+        *out_t = best_t;
+        *out_pt = best_pt;
+        *out_norm = best_norm;
+        *out_heat = best_heat;
+        *out_part = best_part;
+        return true;
+    }
+    return false;
 }
 
 static bool intersect_sub_cylinder(Vec3 p1, Vec3 p2, float radius, float sag_amount,
@@ -1760,6 +2051,34 @@ static void update_simulation(void) {
         }
     }
 
+    if (g_is_dark_souls && g_sword.active) {
+        // Sustain constant mystical bonfire flame activity
+        g_ash_bed.heat = fmaxf(0.85f, g_ash_bed.heat);
+
+        // Update blade heat
+        for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
+            float s = 6.8f * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
+            g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (3.8f - s) / 3.0f)) * g_ash_bed.heat;
+        }
+
+        // Swirling golden flame sparks rising along the coiled blade
+        if (rand_f() < 0.65f) {
+            float s = rand_f() * 3.8f;
+            Vec3 u = g_sword.axis;
+            Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
+            Vec3 w2 = vec3_cross(u, w1);
+            float phase = s * 2.4f + g_anim_time * 5.0f;
+            Vec3 offset = vec3_add(vec3_scale(w1, 0.45f * sinf(phase)), vec3_scale(w2, 0.45f * cosf(phase)));
+            Vec3 sp_p = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), offset));
+            Vec3 sp_v = (Vec3){
+                (rand_f() - 0.5f) * 0.7f + offset.x * 0.5f,
+                rand_f() * 2.8f + 1.8f,
+                (rand_f() - 0.5f) * 0.7f + offset.z * 0.5f
+            };
+            spawn_spark_3d(sp_p, sp_v, rand_range(25, 55), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+        }
+    }
+
     // Post-extinction thin delicate wispy smoke drifting from cool ash bed
     if (g_sim_time >= 3000.0f && g_sim_time < 3350.0f) {
         if (rand_f() < 0.12f) {
@@ -2108,6 +2427,27 @@ static void render_scene(void) {
                 }
             }
 
+            // Test 3D Coiled Sword (Dark Souls Mode)
+            Vec3 sword_pt = {0,0,0}, sword_norm = {0,1,0};
+            float sword_heat = 0.0f;
+            int sword_part = 0;
+            if (g_is_dark_souls && g_sword.active) {
+                float t;
+                Vec3 pt, norm;
+                float heat;
+                int part;
+                if (intersect_sword(&g_sword, ray_orig, ray_dir, &t, &pt, &norm, &heat, &part)) {
+                    if (t < closest_t) {
+                        closest_t = t;
+                        sword_pt = pt;
+                        sword_norm = norm;
+                        sword_heat = heat;
+                        sword_part = part;
+                        hit_type = 6;
+                    }
+                }
+            }
+
             // Test ground/ash bed plane — flat at ground_y, inside stone ring radius
             // This is more realistic than a dome: ash lies on the floor between logs
             Vec3 ash_bed_pt = {0,0,0}, ash_bed_norm = {0,1,0};
@@ -2426,7 +2766,7 @@ static void render_scene(void) {
                     int b_idx = (int)(light_val * 2.4f + 1.2f);
                     if (b_idx < 1) b_idx = 1;
                     if (b_idx > 4) b_idx = 4;
-                    g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                    g_shade_buf[y][x] = g_is_dark_souls ? PALETTE_BONE[b_idx] : PALETTE_WOOD[b_idx];
                 }
 
             } else if (hit_type == 5 && hit_leaf != NULL) {
@@ -2458,6 +2798,54 @@ static void render_scene(void) {
                     if (g_idx < 1) g_idx = 1;
                     if (g_idx > 2) g_idx = 2;
                     g_shade_buf[y][x] = PALETTE_LEAF[g_idx];
+                }
+
+            } else if (hit_type == 6) {
+                g_id_buf[y][x] = OBJ_SWORD;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(sword_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, sword_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.06f * l_dist + 0.012f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, vec3_dot(sword_norm, l_dir));
+
+                // Specular reflection of fire light off metal
+                Vec3 v_dir = vec3_norm(vec3_sub(cam_pos, sword_pt));
+                Vec3 h_dir = vec3_norm(vec3_add(l_dir, v_dir));
+                float ndoth = fmaxf(0.0f, vec3_dot(sword_norm, h_dir));
+                float spec = powf(ndoth, 8.0f) * 1.8f * flicker;
+
+                float ambient = 0.28f + 0.14f * fmaxf(0.0f, sword_norm.y);
+                float light_val = ndotl * atten * light_intensity * 2.2f + ambient + spec;
+
+                if (sword_part == 0 && sword_heat > 0.08f) {
+                    float h = sword_heat * (0.65f + 0.35f * flicker);
+                    if (h > 0.82f) {
+                        g_shade_buf[y][x] = (RGB){255, 245, 200}; // Incandescent white-hot
+                    } else if (h > 0.58f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[3];     // Bright flame orange
+                    } else if (h > 0.35f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[2];     // Molten red
+                    } else if (h > 0.16f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[1];     // Dark cherry red
+                    } else {
+                        g_shade_buf[y][x] = (RGB){90, 32, 20};     // Glowing ember edge
+                    }
+                } else if (sword_part == 2) {
+                    // Leather-wrapped grip
+                    int grip_band = ((int)(sword_pt.y * 14.0f)) % 2;
+                    int c_idx = (int)(light_val * 1.5f) + (grip_band ? 1 : 0);
+                    if (c_idx < 0) c_idx = 0;
+                    if (c_idx > 4) c_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_IRON[c_idx];
+                } else {
+                    // Weathered forged steel for upper blade, guard, and pommel
+                    int c_idx = (int)(light_val * 1.8f);
+                    if (spec > 0.45f) c_idx = 4;
+                    if (c_idx < 0) c_idx = 0;
+                    if (c_idx > 4) c_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_IRON[c_idx];
                 }
             }
         }
@@ -2493,6 +2881,8 @@ static void render_scene(void) {
                     g_frame[y][x].color = g_shade_buf[y][x];
                 } else if (curr_id == OBJ_ASH_BED) {
                     g_frame[y][x].color = PALETTE_DIRT[0];
+                } else if (curr_id == OBJ_SWORD) {
+                    g_frame[y][x].color = PALETTE_IRON[0];
                 } else {
                     g_frame[y][x].color = PALETTE_WOOD[0]; // Dark outline
                 }
@@ -2713,10 +3103,17 @@ static void present_frame(void) {
     int rem_min = (int)(rem_sec_total / 60.0f);
     int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
-    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-        "\033[1;33m[Lareira 3D]\033[0m Tempo Ativo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [Q] Sair ",
-        el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
-        g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+    if (g_is_dark_souls) {
+        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+            "\033[1;31m[FOGUEIRA DARK SOULS]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
+            el_min, el_sec, tot_min, rem_min, rem_sec,
+            g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+    } else {
+        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+            "\033[1;33m[Lareira 3D]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [M] Modo [Q] Sair ",
+            el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
+            g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+    }
 
     if (buf_len > 0) {
         safe_write(STDOUT_FILENO, buf, buf_len);
@@ -2755,8 +3152,11 @@ static void handle_input(void) {
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'g' || ch == 'G' || ch == 't' || ch == 'T' || ch == ' ') {
             g_auto_turntable = !g_auto_turntable;
+        } else if (ch == 'm' || ch == 'M') {
+            g_is_dark_souls = !g_is_dark_souls;
+            init_scene();
         } else if (ch == 'f' || ch == 'F') {
-            stoke_fire_add_wood();
+            if (!g_is_dark_souls) stoke_fire_add_wood();
         } else if (ch == 'r' || ch == 'R') {
             init_scene();
         } else if (ch == 'q' || ch == 'Q') {
@@ -2768,10 +3168,35 @@ static void handle_input(void) {
 int main(int argc, char **argv) {
     g_rng ^= (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16) ^ 0x9e3779b9;
 
+    const char *snapshot_out = NULL;
+    float snapshot_sim = 0.0f;
+    float snapshot_yaw = 0.0f;
+    float snapshot_pitch = 20.0f;
+    bool do_snapshot = false;
+
+    const char *turntable_dir = NULL;
+    int turntable_frames = 60;
+    float turntable_sim = 250.0f;
+    bool do_turntable = false;
+
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
             print_bonfire_history();
             return 0;
+        } else if (strcmp(argv[i], "--souls") == 0 || strcmp(argv[i], "--ds") == 0 || strcmp(argv[i], "--darksouls") == 0) {
+            g_is_dark_souls = true;
+        } else if (strcmp(argv[i], "--snapshot") == 0 && i + 1 < argc) {
+            do_snapshot = true;
+            snapshot_out = argv[++i];
+            if (i + 1 < argc && argv[i + 1][0] != '-') snapshot_sim = (float)atof(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') snapshot_yaw = (float)atof(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') snapshot_pitch = (float)atof(argv[++i]);
+        } else if (strcmp(argv[i], "--turntable") == 0) {
+            do_turntable = true;
+            if (i + 1 < argc && argv[i + 1][0] != '-') turntable_dir = argv[++i];
+            else turntable_dir = "/tmp";
+            if (i + 1 < argc && argv[i + 1][0] != '-') turntable_frames = atoi(argv[++i]);
+            if (i + 1 < argc && argv[i + 1][0] != '-') turntable_sim = (float)atof(argv[++i]);
         } else if (strcmp(argv[i], "--fast") == 0) {
             g_realtime_mode = false;
             g_time_scale = 30.0f;
@@ -2795,19 +3220,18 @@ int main(int argc, char **argv) {
         }
     }
 
-    if (argc > 2 && strcmp(argv[1], "--snapshot") == 0) {
+    if (do_snapshot && snapshot_out != NULL) {
         g_pixel_w = 120;
         g_pixel_h = 70;
         init_scene();
-        float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
-        if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
-        if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
-        g_time_scale = 30.0f; // Fast advance for headless snapshot rendering
-        while (g_sim_time < target_sim) {
+        g_cam_yaw = snapshot_yaw * (float)M_PI / 180.0f;
+        g_cam_pitch = snapshot_pitch * (float)M_PI / 180.0f;
+        g_time_scale = 30.0f;
+        while (g_sim_time < snapshot_sim) {
             update_simulation();
         }
         render_scene();
-        FILE *f = fopen(argv[2], "wb");
+        FILE *f = fopen(snapshot_out, "wb");
         if (f) {
             fprintf(f, "P6\n%d %d\n255\n", g_pixel_w, g_pixel_h);
             for (int y = 0; y < g_pixel_h; y++) {
@@ -2822,26 +3246,23 @@ int main(int argc, char **argv) {
         return 0;
     }
 
-    if (argc > 1 && strcmp(argv[1], "--turntable") == 0) {
-        const char *out_dir = (argc > 2) ? argv[2] : "/tmp";
-        int num_frames = (argc > 3) ? atoi(argv[3]) : 60;
-        float target_sim = (argc > 4) ? atof(argv[4]) : 300.0f;
+    if (do_turntable) {
         g_pixel_w = 120;
         g_pixel_h = 70;
         init_scene();
         g_time_scale = 30.0f;
-        while (g_sim_time < target_sim) {
+        while (g_sim_time < turntable_sim) {
             update_simulation();
         }
         g_time_scale = 1.0f;
-        for (int fr = 0; fr < num_frames; fr++) {
-            g_cam_yaw = (float)fr / (float)num_frames * 2.0f * (float)M_PI;
+        for (int fr = 0; fr < turntable_frames; fr++) {
+            g_cam_yaw = (float)fr / (float)turntable_frames * 2.0f * (float)M_PI;
             g_cam_pitch = 0.32f;
             g_anim_time += 0.05f;
             update_simulation();
             render_scene();
             char path[512];
-            snprintf(path, sizeof(path), "%s/frame_%04d.ppm", out_dir, fr);
+            snprintf(path, sizeof(path), "%s/frame_%04d.ppm", turntable_dir, fr);
             FILE *f = fopen(path, "wb");
             if (f) {
                 fprintf(f, "P6\n%d %d\n255\n", g_pixel_w, g_pixel_h);
