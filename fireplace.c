@@ -3579,11 +3579,12 @@ static void render_scene(void) {
     }
 }
 
-static void present_frame(void) {
-    static char buf[140000];
+static int format_frame_buffer(char *buf, int buf_cap) {
+    if (!buf || buf_cap <= 0) return 0;
     int buf_len = 0;
 
-    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[H");
+    int n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[H");
+    if (n > 0) buf_len += n;
 
     int prev_fg_r = -1, prev_fg_g = -1, prev_fg_b = -1;
     int prev_bg_r = -1, prev_bg_g = -1, prev_bg_b = -1;
@@ -3595,68 +3596,77 @@ static void present_frame(void) {
         int y_bot = r * 2 + 1;
 
         for (int x = 0; x < g_pixel_w; x++) {
+            if (buf_len >= buf_cap - 64) break;
             Pixel top = g_frame[y_top][x];
             Pixel bot = g_frame[y_bot][x];
 
             if (top.is_sky && bot.is_sky) {
                 if (!prev_bg_transp) {
-                    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[49m");
+                    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[49m");
+                    if (n > 0) buf_len += n;
                     prev_bg_transp = true;
                     prev_bg_r = prev_bg_g = prev_bg_b = -1;
                 }
-                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, " ");
+                buf[buf_len++] = ' ';
                 continue;
             }
 
             if (top.is_sky && !bot.is_sky) {
                 if (bot.color.r != prev_fg_r || bot.color.g != prev_fg_g || bot.color.b != prev_fg_b) {
-                    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
-                                        bot.color.r, bot.color.g, bot.color.b);
+                    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[38;2;%d;%d;%dm",
+                                 bot.color.r, bot.color.g, bot.color.b);
+                    if (n > 0) buf_len += n;
                     prev_fg_r = bot.color.r; prev_fg_g = bot.color.g; prev_fg_b = bot.color.b;
                 }
                 if (!prev_bg_transp) {
-                    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[49m");
+                    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[49m");
+                    if (n > 0) buf_len += n;
                     prev_bg_transp = true;
                     prev_bg_r = prev_bg_g = prev_bg_b = -1;
                 }
-                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "▄");
+                n = snprintf(buf + buf_len, buf_cap - buf_len, "▄");
+                if (n > 0) buf_len += n;
                 continue;
             }
 
             if (!top.is_sky && bot.is_sky) {
                 if (top.color.r != prev_fg_r || top.color.g != prev_fg_g || top.color.b != prev_fg_b) {
-                    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
-                                        top.color.r, top.color.g, top.color.b);
+                    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[38;2;%d;%d;%dm",
+                                 top.color.r, top.color.g, top.color.b);
+                    if (n > 0) buf_len += n;
                     prev_fg_r = top.color.r; prev_fg_g = top.color.g; prev_fg_b = top.color.b;
                 }
                 if (!prev_bg_transp) {
-                    buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[49m");
+                    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[49m");
+                    if (n > 0) buf_len += n;
                     prev_bg_transp = true;
                     prev_bg_r = prev_bg_g = prev_bg_b = -1;
                 }
-                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "▀");
+                n = snprintf(buf + buf_len, buf_cap - buf_len, "▀");
+                if (n > 0) buf_len += n;
                 continue;
             }
 
             if (top.color.r != prev_fg_r || top.color.g != prev_fg_g || top.color.b != prev_fg_b) {
-                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
-                                    top.color.r, top.color.g, top.color.b);
+                n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[38;2;%d;%d;%dm",
+                             top.color.r, top.color.g, top.color.b);
+                if (n > 0) buf_len += n;
                 prev_fg_r = top.color.r; prev_fg_g = top.color.g; prev_fg_b = top.color.b;
             }
             if (bot.color.r != prev_bg_r || bot.color.g != prev_bg_g || bot.color.b != prev_bg_b) {
-                buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[48;2;%d;%d;%dm",
-                                    bot.color.r, bot.color.g, bot.color.b);
+                n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[48;2;%d;%d;%dm",
+                             bot.color.r, bot.color.g, bot.color.b);
+                if (n > 0) buf_len += n;
                 prev_bg_r = bot.color.r; prev_bg_g = bot.color.g; prev_bg_b = bot.color.b;
                 prev_bg_transp = false;
             }
-            buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "▀");
-
-            if (buf_len > 120000) {
-                safe_write(STDOUT_FILENO, buf, buf_len);
-                buf_len = 0;
-            }
+            n = snprintf(buf + buf_len, buf_cap - buf_len, "▀");
+            if (n > 0) buf_len += n;
         }
-        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[0m\n");
+        if (buf_len < buf_cap - 32) {
+            n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[0m\n");
+            if (n > 0) buf_len += n;
+        }
         prev_fg_r = prev_fg_g = prev_fg_b = -1;
         prev_bg_r = prev_bg_g = prev_bg_b = -1;
         prev_bg_transp = true;
@@ -3671,19 +3681,29 @@ static void present_frame(void) {
     int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
     if (g_is_dark_souls) {
-        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
             "\033[1;31m[BONFIRE LIT]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [K/F] Avivar [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
             el_min, el_sec, tot_min, rem_min, rem_sec,
             g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+        if (n > 0) buf_len += n;
     } else {
-        buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
             "\033[1;33m[Lareira 3D]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [M] Modo [Q] Sair ",
             el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
             g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+        if (n > 0) buf_len += n;
     }
 
-    if (buf_len > 0) {
-        safe_write(STDOUT_FILENO, buf, buf_len);
+    if (buf_len >= buf_cap) buf_len = buf_cap - 1;
+    buf[buf_len] = '\0';
+    return buf_len;
+}
+
+static void present_frame(void) {
+    static char s_present_buf[524288];
+    int len = format_frame_buffer(s_present_buf, sizeof(s_present_buf));
+    if (len > 0) {
+        safe_write(STDOUT_FILENO, s_present_buf, len);
     }
 }
 
@@ -3753,8 +3773,162 @@ static void handle_input(void) {
     }
 }
 
+static inline double get_monotonic_time_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1000000.0;
+}
+
+static int cmp_double(const void *a, const void *b) {
+    double da = *(const double *)a;
+    double db = *(const double *)b;
+    if (da < db) return -1;
+    if (da > db) return 1;
+    return 0;
+}
+
+typedef struct {
+    char name[64];
+    int pixel_w;
+    int pixel_h;
+    int frames;
+    double sim_avg_ms;
+    double render_avg_ms;
+    double format_avg_ms;
+    double total_min_ms;
+    double total_med_ms;
+    double total_avg_ms;
+    double total_p95_ms;
+    double total_p99_ms;
+    double total_max_ms;
+    double throughput_fps;
+    double low_1pct_fps;
+    size_t avg_buffer_bytes;
+} BenchmarkResult;
+
+static BenchmarkResult benchmark_pipeline(const char *scenario_name, bool ds_mode, int w, int h, int num_frames) {
+    static char s_bench_buf[524288];
+    g_is_dark_souls = ds_mode;
+    g_pixel_w = w;
+    g_pixel_h = h;
+    init_scene();
+
+    // Warm-up 20 frames so caches are hot, fire cellular automata is active, and sparks are spawned
+    for (int i = 0; i < 20; i++) {
+        g_cam_yaw += 0.03f;
+        g_anim_time += 0.04f;
+        update_simulation();
+        render_scene();
+        format_frame_buffer(s_bench_buf, sizeof(s_bench_buf));
+    }
+
+    double *times = malloc(num_frames * sizeof(double));
+    if (!times) {
+        BenchmarkResult empty = {0};
+        return empty;
+    }
+
+    double tot_sim = 0.0, tot_render = 0.0, tot_format = 0.0;
+    size_t tot_bytes = 0;
+
+    for (int i = 0; i < num_frames; i++) {
+        g_cam_yaw += 0.02f;
+        g_anim_time += 0.04f;
+
+        double t0 = get_monotonic_time_ms();
+        update_simulation();
+        double t1 = get_monotonic_time_ms();
+        render_scene();
+        double t2 = get_monotonic_time_ms();
+        int bytes = format_frame_buffer(s_bench_buf, sizeof(s_bench_buf));
+        double t3 = get_monotonic_time_ms();
+
+        double d_sim = t1 - t0;
+        double d_render = t2 - t1;
+        double d_format = t3 - t2;
+        double d_total = d_sim + d_render + d_format;
+
+        times[i] = d_total;
+        tot_sim += d_sim;
+        tot_render += d_render;
+        tot_format += d_format;
+        tot_bytes += (bytes > 0 ? (size_t)bytes : 0);
+    }
+
+    qsort(times, num_frames, sizeof(double), cmp_double);
+
+    BenchmarkResult res;
+    memset(&res, 0, sizeof(res));
+    snprintf(res.name, sizeof(res.name), "%s", scenario_name);
+    res.pixel_w = w;
+    res.pixel_h = h;
+    res.frames = num_frames;
+    res.sim_avg_ms = tot_sim / num_frames;
+    res.render_avg_ms = tot_render / num_frames;
+    res.format_avg_ms = tot_format / num_frames;
+    res.total_min_ms = times[0];
+    res.total_med_ms = times[num_frames / 2];
+    res.total_avg_ms = (tot_sim + tot_render + tot_format) / num_frames;
+    int idx_p95 = (int)(num_frames * 0.95);
+    if (idx_p95 >= num_frames) idx_p95 = num_frames - 1;
+    res.total_p95_ms = times[idx_p95];
+    int idx_p99 = (int)(num_frames * 0.99);
+    if (idx_p99 >= num_frames) idx_p99 = num_frames - 1;
+    res.total_p99_ms = times[idx_p99];
+    res.total_max_ms = times[num_frames - 1];
+    res.throughput_fps = (res.total_avg_ms > 0.0001) ? (1000.0 / res.total_avg_ms) : 9999.0;
+    res.low_1pct_fps = (res.total_p99_ms > 0.0001) ? (1000.0 / res.total_p99_ms) : 9999.0;
+    res.avg_buffer_bytes = tot_bytes / num_frames;
+
+    free(times);
+    return res;
+}
+
+static void run_benchmark_suite(int frames) {
+    if (frames < 30) frames = 30;
+    printf("\n===================================================================================================\n");
+    printf("                    FIREPLACE & DARK SOULS BONFIRE BENCHMARK REPORT (%d frames)\n", frames);
+    printf("===================================================================================================\n");
+
+    BenchmarkResult r[4];
+    r[0] = benchmark_pipeline("Dark Souls Bonfire", true, 120, 70, frames);
+    r[1] = benchmark_pipeline("Standard Fireplace", false, 120, 70, frames);
+    r[2] = benchmark_pipeline("Dark Souls Bonfire", true, 160, 90, frames);
+    r[3] = benchmark_pipeline("Standard Fireplace", false, 160, 90, frames);
+
+    printf("+----------------------+------------+------------+-----------+-----------+-----------+-----------------------+-------------+-------------+\n");
+    printf("| Scenario             | Res (char) | Avg Total  | Median    | P95       | P99       | Stage Split (S/R/F)   | Throughput  | 1%% Low FPS  |\n");
+    printf("+----------------------+------------+------------+-----------+-----------+-----------+-----------------------+-------------+-------------+\n");
+
+    for (int i = 0; i < 4; i++) {
+        double total = r[i].total_avg_ms;
+        double s_pct = (total > 0.0) ? (r[i].sim_avg_ms / total * 100.0) : 0.0;
+        double r_pct = (total > 0.0) ? (r[i].render_avg_ms / total * 100.0) : 0.0;
+        double f_pct = (total > 0.0) ? (r[i].format_avg_ms / total * 100.0) : 0.0;
+        char char_res[24];
+        snprintf(char_res, sizeof(char_res), "%dx%d", r[i].pixel_w, r[i].pixel_h / 2);
+
+        printf("| %-20s | %-10s | %6.2f ms | %6.2f ms | %6.2f ms | %6.2f ms | %4.1f%% / %4.1f%% / %4.1f%% | %7.1f FPS | %7.1f FPS |\n",
+               r[i].name, char_res, r[i].total_avg_ms, r[i].total_med_ms, r[i].total_p95_ms, r[i].total_p99_ms,
+               s_pct, r_pct, f_pct, r[i].throughput_fps, r[i].low_1pct_fps);
+    }
+    printf("+----------------------+------------+------------+-----------+-----------+-----------+-----------------------+-------------+-------------+\n\n");
+
+    printf("Analysis & 60 FPS Target (Budget: 16.67 ms):\n");
+    for (int i = 0; i < 4; i++) {
+        double headroom = (16.6667 - r[i].total_avg_ms) / 16.6667 * 100.0;
+        printf(" - [%s @ %dx%d (%dx%d chars)]: Avg %.2f ms (%.1f FPS) | ANSI frame size: %4.1f KB | Headroom: %+.1f%%\n",
+               r[i].name, r[i].pixel_w, r[i].pixel_h, r[i].pixel_w, r[i].pixel_h / 2,
+               r[i].total_avg_ms, r[i].throughput_fps, (double)r[i].avg_buffer_bytes / 1024.0, headroom);
+    }
+    printf("===================================================================================================\n\n");
+}
+
 int main(int argc, char **argv) {
     g_rng ^= (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16) ^ 0x9e3779b9;
+
+    bool do_benchmark = false;
+    int benchmark_frames = 200;
 
     const char *snapshot_out = NULL;
     float snapshot_sim = 0.0f;
@@ -3771,6 +3945,11 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
             print_bonfire_history();
             return 0;
+        } else if (strcmp(argv[i], "--benchmark") == 0 || strcmp(argv[i], "--perf") == 0) {
+            do_benchmark = true;
+            if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
+                benchmark_frames = atoi(argv[++i]);
+            }
         } else if (strcmp(argv[i], "--souls") == 0 || strcmp(argv[i], "--ds") == 0 || strcmp(argv[i], "--darksouls") == 0) {
             g_is_dark_souls = true;
         } else if (strcmp(argv[i], "--snapshot") == 0 && i + 1 < argc) {
@@ -3806,6 +3985,11 @@ int main(int argc, char **argv) {
             float mins = (float)atof(argv[i]);
             if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
         }
+    }
+
+    if (do_benchmark) {
+        run_benchmark_suite(benchmark_frames);
+        return 0;
     }
 
     if (do_snapshot && snapshot_out != NULL) {
