@@ -28,7 +28,6 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <signal.h>
-#include <pthread.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -39,8 +38,7 @@
 #define MAX_SPARKS 256
 #define MAX_ASH_FLAKES 128
 #define MAX_SMOKE 80
-#define MAX_RAIN 160
-#define MAX_LOGS 16
+#define MAX_LOGS 32
 #define MAX_STONES 24
 #define NUM_LOG_SEGS 10
 
@@ -145,8 +143,6 @@ static const RGB PALETTE_SOOT_PUFF[] = {
     {28, 25, 25},     // 1: Charcoal dust
     {46, 42, 42}      // 2: Ash puff
 };
-
-static const RGB COLOR_RAIN = {165, 190, 220};
 
 typedef struct {
     float x, y, z;
@@ -260,13 +256,6 @@ typedef struct {
 } SmokeParticle;
 
 typedef struct {
-    Vec3 pos;
-    float speed;
-    float length;
-    bool active;
-} RainDrop;
-
-typedef struct {
     RGB color;
     bool is_sky;
 } Pixel;
@@ -300,7 +289,6 @@ static float g_burnt_mass = 0.0f;     // Total fractional burned mass across hea
 static Spark g_sparks[MAX_SPARKS];
 static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 static SmokeParticle g_smoke[MAX_SMOKE];
-static RainDrop g_rain[MAX_RAIN];
 
 // 3D Logs & Stacking Modes
 static Cylinder3D g_logs[MAX_LOGS];
@@ -331,19 +319,9 @@ static bool g_show_hud = true;        // Display status header and physical cloc
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
 static float g_wind_turb = 0.0f;
-static bool g_rain_active = false;
 static float g_collapse_progress = 0.0f;
 static bool g_force_collapse = false;
 static bool g_paused = false;
-
-// Audio Engine State
-static pthread_t g_audio_thread;
-static volatile bool g_audio_running = false;
-static volatile bool g_audio_mute = false;
-static volatile float g_audio_fire_heat = 0.0f;
-static volatile float g_audio_steam_rate = 0.0f;
-static volatile int g_audio_pop_trigger = 0;
-static volatile float g_audio_rain_intensity = 0.0f;
 
 // PRNG
 static uint32_t g_rng = 0x8542b821;
@@ -490,154 +468,12 @@ static void build_kindling(void) {
     init_leaf(&g_leaves[4], OBJ_LEAF_BASE + 4, (Vec3){ 0.1f, -3.25f, -0.25f}, (Vec3){ 0.1f, 0.9f, -0.2f}, 0.26f, 0.40f);
 }
 
-static void* audio_synth_thread(void *arg) {
-    (void)arg;
-    FILE *pipe = popen("aplay -q -f S16_LE -r 44100 -c 1 2>/dev/null || pw-play --format=s16le --rate=44100 --channels=1 2>/dev/null || paplay --raw --format=s16le --rate=44100 --channels=1 2>/dev/null", "w");
-
-    #define AUDIO_CHUNK 512
-    int16_t pcm_buf[AUDIO_CHUNK];
-
-    float roar_lp = 0.0f;
-    float roar_phase = 0.0f;
-    float steam_hp = 0.0f;
-    float steam_bp = 0.0f;
-
-    struct {
-        float phase;
-        float freq;
-        float amp;
-        float decay;
-        bool active;
-    } snaps[4];
-    memset(snaps, 0, sizeof(snaps));
-
-    uint32_t a_rng = 0x12345678;
-
-    while (g_audio_running) {
-        if (!pipe || g_audio_mute) {
-            struct timespec req = {0, 11600000L}; // ~11.6ms for 512 samples
-            nanosleep(&req, NULL);
-            if (!g_audio_running) break;
-            continue;
-        }
-
-        float heat = g_audio_fire_heat;
-        float steam_target = g_audio_steam_rate;
-        float rain_intensity = g_audio_rain_intensity;
-        int pop_trig = g_audio_pop_trigger;
-        if (pop_trig > 0) {
-            g_audio_pop_trigger = 0;
-            for (int i = 0; i < 4 && pop_trig > 0; i++) {
-                if (!snaps[i].active) {
-                    a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
-                    float rf = (a_rng & 0xFFFF) / 65536.0f;
-                    snaps[i].active = true;
-                    snaps[i].phase = 0.0f;
-                    snaps[i].freq = 300.0f + rf * 700.0f;
-                    snaps[i].amp = 0.45f + rf * 0.35f;
-                    snaps[i].decay = 0.00012f + rf * 0.00015f;
-                    pop_trig--;
-                }
-            }
-        }
-
-        if (heat > 0.15f) {
-            a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
-            float rf = (a_rng & 0xFFFF) / 65536.0f;
-            if (rf < (0.0010f * heat)) {
-                for (int i = 0; i < 4; i++) {
-                    if (!snaps[i].active) {
-                        snaps[i].active = true;
-                        snaps[i].phase = 0.0f;
-                        snaps[i].freq = 350.0f + rf * 850.0f;
-                        snaps[i].amp = 0.22f + rf * 0.30f;
-                        snaps[i].decay = 0.00015f + rf * 0.00020f;
-                        break;
-                    }
-                }
-            }
-        }
-
-        for (int n = 0; n < AUDIO_CHUNK; n++) {
-            a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
-            float white = ((int32_t)(a_rng & 0xFFFF) - 32768) / 32768.0f;
-
-            // 1. Low Convection Roar (Brownian / Lowpass)
-            float lp_coeff = 0.010f + 0.018f * heat;
-            roar_lp += (white - roar_lp) * lp_coeff;
-            roar_phase += 2.0f * (float)M_PI * 0.8f / 44100.0f;
-            if (roar_phase > 2.0f * (float)M_PI) roar_phase -= 2.0f * (float)M_PI;
-            float roar_mod = 0.85f + 0.15f * sinf(roar_phase);
-            float roar_out = roar_lp * heat * 0.55f * roar_mod;
-
-            // 2. Steam Sizzle / Hiss (Bandpass ~2-4 kHz)
-            steam_hp += (white - steam_hp) * 0.40f;
-            float high_sig = white - steam_hp;
-            steam_bp += (high_sig - steam_bp) * 0.18f;
-            float steam_out = steam_bp * fminf(1.0f, steam_target + rain_intensity * 0.40f) * 0.28f;
-
-            // 3. Rain Drizzle
-            float rain_out = 0.0f;
-            if (rain_intensity > 0.01f) {
-                rain_out = white * 0.035f * rain_intensity;
-            }
-
-            // 4. Snaps / Crackles
-            float snap_out = 0.0f;
-            for (int i = 0; i < 4; i++) {
-                if (snaps[i].active) {
-                    snaps[i].phase += 2.0f * (float)M_PI * snaps[i].freq / 44100.0f;
-                    float s_sig = (sinf(snaps[i].phase) + (white * 0.35f)) * snaps[i].amp;
-                    snap_out += s_sig;
-                    snaps[i].amp -= snaps[i].amp * snaps[i].decay * 44100.0f / 512.0f;
-                    if (snaps[i].amp <= 0.005f) {
-                        snaps[i].active = false;
-                    }
-                }
-            }
-
-            float mix = roar_out + steam_out + rain_out + snap_out;
-            if (mix > 1.0f) mix = 1.0f;
-            if (mix < -1.0f) mix = -1.0f;
-            pcm_buf[n] = (int16_t)(mix * 32000.0f);
-        }
-
-        size_t written = fwrite(pcm_buf, sizeof(int16_t), AUDIO_CHUNK, pipe);
-        if (written < AUDIO_CHUNK) {
-            struct timespec req = {0, 5000000L};
-            nanosleep(&req, NULL);
-        } else {
-            fflush(pipe);
-        }
-    }
-
-    if (pipe) {
-        pclose(pipe);
-    }
-    return NULL;
-}
-
-static void start_audio_engine(void) {
-    if (!g_audio_running) {
-        g_audio_running = true;
-        pthread_create(&g_audio_thread, NULL, audio_synth_thread, NULL);
-    }
-}
-
-static void stop_audio_engine(void) {
-    if (g_audio_running) {
-        g_audio_running = false;
-        pthread_join(g_audio_thread, NULL);
-    }
-}
-
 static void safe_write(int fd, const void *buf, size_t count) {
     ssize_t ret = write(fd, buf, count);
     (void)ret;
 }
 
 static void reset_terminal(void) {
-    stop_audio_engine();
     safe_write(STDOUT_FILENO, "\033[?1049l\033[?25h\033[0m\n", 17);
     tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
 }
@@ -978,7 +814,6 @@ static void init_scene(void) {
     memset(g_sparks, 0, sizeof(g_sparks));
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
     memset(g_smoke, 0, sizeof(g_smoke));
-    memset(g_rain, 0, sizeof(g_rain));
 
     g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
     g_ash_bed.radius_xz = 4.8f;
@@ -1241,28 +1076,12 @@ static void spawn_smoke_3d(Vec3 pos, Vec3 vel, float size, float life, int type)
     }
 }
 
-static void spawn_rain_drop(void) {
-    for (int i = 0; i < MAX_RAIN; i++) {
-        if (!g_rain[i].active) {
-            g_rain[i].pos = (Vec3){
-                (rand_f() - 0.5f) * 16.0f,
-                rand_f() * 4.0f + 8.0f,
-                (rand_f() - 0.5f) * 16.0f
-            };
-            g_rain[i].speed = rand_f() * 6.0f + 20.0f;
-            g_rain[i].length = rand_f() * 0.35f + 0.35f;
-            g_rain[i].active = true;
-            break;
-        }
-    }
-}
-
 static void stoke_fire_add_wood(void) {
     g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.40f);
 
     // Revive kindling
     for (int i = 0; i < g_num_twigs; i++) {
-        if (!g_twigs[i].active) {
+        if (!g_twigs[i].active || g_twigs[i].burn_progress > 0.85f) {
             g_twigs[i].active = true;
             g_twigs[i].burn_progress = 0.0f;
             g_twigs[i].moisture = 0.05f;
@@ -1270,51 +1089,63 @@ static void stoke_fire_add_wood(void) {
         }
     }
     for (int l = 0; l < g_num_leaves; l++) {
-        if (!g_leaves[l].active) {
+        if (!g_leaves[l].active || g_leaves[l].burn_progress > 0.85f) {
             g_leaves[l].active = true;
             g_leaves[l].burn_progress = 0.0f;
             g_leaves[l].temp = 0.55f;
         }
     }
 
-    // Add fresh log or replace consumed log
+    // Add fresh log into new slot or replace fully consumed log
     int target_slot = -1;
     if (g_num_logs < MAX_LOGS) {
         target_slot = g_num_logs;
         g_num_logs++;
     } else {
+        // Find truly consumed log
         float min_mass = 999.0f;
-        int min_idx = 0;
+        int min_idx = -1;
         for (int i = 0; i < g_num_logs; i++) {
             float m = 0.0f;
-            for (int s = 0; s < NUM_LOG_SEGS; s++) m += g_logs[i].segments[s].structural_mass;
-            if (m < min_mass) {
+            bool all_burnt = true;
+            for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                m += g_logs[i].segments[s].structural_mass;
+                if (g_logs[i].segments[s].burn_progress < 0.90f) all_burnt = false;
+            }
+            if (all_burnt && m < 0.10f && m < min_mass) {
                 min_mass = m;
                 min_idx = i;
             }
         }
-        target_slot = min_idx;
+        if (min_idx >= 0) {
+            target_slot = min_idx;
+        }
     }
 
     if (target_slot >= 0) {
         float angle = rand_f() * (float)M_PI;
-        float dist = 2.4f;
-        Vec3 p1 = (Vec3){ cosf(angle) * dist, -2.4f, sinf(angle) * dist };
-        Vec3 p2 = (Vec3){ -cosf(angle) * dist, -2.2f, -sinf(angle) * dist };
-        Vec3 p1_col = (Vec3){ p1.x * 0.9f, -3.9f, p1.z * 0.9f };
-        Vec3 p2_col = (Vec3){ p2.x * 0.9f, -3.9f, p2.z * 0.9f };
-        init_cylinder(&g_logs[target_slot], 100 + target_slot, p1, p2, p1_col, p2_col, 0.48f, 0.0f);
+        float span = 4.4f + rand_f() * 0.6f;
+        float radius = 0.95f + rand_f() * 0.25f;
+        float ground_y = -4.2f;
+
+        Vec3 p1 = (Vec3){ cosf(angle) * span, -2.0f + (rand_f() - 0.5f) * 0.4f, sinf(angle) * span };
+        Vec3 p2 = (Vec3){ -cosf(angle) * span, -1.8f + (rand_f() - 0.5f) * 0.4f, -sinf(angle) * span };
+        Vec3 p1_col = (Vec3){ cosf(angle) * (span * 0.92f), ground_y + radius + 0.30f, sinf(angle) * (span * 0.92f) };
+        Vec3 p2_col = (Vec3){ -cosf(angle) * (span * 0.92f), ground_y + radius + 0.30f, -sinf(angle) * (span * 0.92f) };
+
+        init_cylinder(&g_logs[target_slot], 100 + target_slot, p1, p2, p1_col, p2_col, radius, 0.0f);
+        g_logs[target_slot].support_log1 = -1;
+        g_logs[target_slot].support_log2 = -1;
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             g_logs[target_slot].segments[s].moisture = 0.12f;
-            g_logs[target_slot].segments[s].temp = 0.20f;
+            g_logs[target_slot].segments[s].temp = 0.30f;
         }
     }
 
-    g_audio_pop_trigger += 4;
     Vec3 hearth_c = (Vec3){0.0f, -3.5f, 0.0f};
-    for (int sp = 0; sp < 28; sp++) {
-        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.8f, rand_f() * 4.0f + 2.0f, (rand_f() - 0.5f) * 2.8f};
-        spawn_spark_3d(hearth_c, sp_v, rand_range(20, 50), PALETTE_EMBERS[rand_range(2, 4)]);
+    for (int sp = 0; sp < 36; sp++) {
+        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 3.2f, rand_f() * 4.5f + 2.5f, (rand_f() - 0.5f) * 3.2f};
+        spawn_spark_3d(hearth_c, sp_v, rand_range(25, 55), PALETTE_EMBERS[rand_range(2, 4)]);
     }
 }
 
@@ -1349,9 +1180,6 @@ static void update_simulation(void) {
     float step_dt = dt / (float)num_substeps;
 
     Vec3 kindle_pos = (Vec3){0.0f, -2.6f, 0.0f};
-
-    // Track frame total evaporation for audio steam hiss
-    float frame_evap_rate = 0.0f;
 
     for (int step = 0; step < num_substeps; step++) {
         float cur_sim_t = g_sim_time - dt + (step + 1) * step_dt;
@@ -1418,7 +1246,6 @@ static void update_simulation(void) {
                     evap = (0.0018f * (g_logs[i].segments[s].temp - 0.05f) + 0.0030f * kindle_heat * eta_r) * step_dt;
                     if (evap > g_logs[i].segments[s].moisture) evap = g_logs[i].segments[s].moisture;
                     g_logs[i].segments[s].moisture -= evap;
-                    frame_evap_rate += evap * 15.0f;
 
                     // Emit fluffy white steam particle
                     if (rand_f() < (0.12f * step_dt * 40.0f)) {
@@ -1504,7 +1331,6 @@ static void update_simulation(void) {
                 // 9. Sap Pocket Pops
                 if (g_logs[i].segments[s].temp > 0.45f && g_logs[i].segments[s].burn_progress >= 0.15f && g_logs[i].segments[s].burn_progress <= 0.75f) {
                     if (rand_f() < (0.015f * step_dt * 40.0f)) {
-                        g_audio_pop_trigger++;
                         int num_sp = rand_range(6, 10);
                         for (int sp = 0; sp < num_sp; sp++) {
                             float angle = rand_f() * 6.28318f;
@@ -1559,7 +1385,6 @@ static void update_simulation(void) {
             if (g_twigs[tw].temp > 0.08f && g_twigs[tw].moisture > 0.001f) {
                 float evap = 0.0065f * (g_twigs[tw].temp - 0.05f) * step_dt;
                 g_twigs[tw].moisture = fmaxf(0.0f, g_twigs[tw].moisture - evap);
-                frame_evap_rate += evap * 20.0f;
             }
             if (g_twigs[tw].moisture <= 0.04f && g_twigs[tw].temp > 0.25f) {
                 float exo = 0.0050f * (g_twigs[tw].temp - 0.20f) * step_dt;
@@ -1642,7 +1467,6 @@ static void update_simulation(void) {
             if (own_center_mass < 0.22f && !g_logs[i].snapped) {
                 g_logs[i].snapped = true;
                 g_logs[i].fractured = true;
-                g_audio_pop_trigger += 3;
 
                 Vec3 ctr_p = vec3_scale(vec3_add(g_logs[i].p1, g_logs[i].p2), 0.5f);
                 ctr_p.y -= g_logs[i].sag_amount;
@@ -1696,37 +1520,6 @@ static void update_simulation(void) {
             }
 
             recompute_cylinder_axes(&g_logs[i]);
-        }
-
-        // Update audio variables
-        float total_heat = (float)active_burning_segs / (float)(g_num_logs * NUM_LOG_SEGS) * 2.2f + g_ash_bed.heat * 0.35f;
-        if (cur_sim_t < 60.0f) total_heat += kindle_heat * 0.45f;
-        g_audio_fire_heat += (fminf(1.0f, total_heat) - g_audio_fire_heat) * 0.08f;
-        g_audio_steam_rate = fmaxf(0.0f, g_audio_steam_rate - 0.005f) + frame_evap_rate;
-        g_audio_rain_intensity += ((g_rain_active ? 1.0f : 0.0f) - g_audio_rain_intensity) * 0.1f;
-    }
-
-    // -------------------------------------------------------------------------
-    // RAIN SIMULATION (Drizzle & Sizzle on Hearth)
-    // -------------------------------------------------------------------------
-    if (g_rain_active) {
-        for (int r = 0; r < 4; r++) spawn_rain_drop();
-    }
-    for (int i = 0; i < MAX_RAIN; i++) {
-        if (g_rain[i].active) {
-            g_rain[i].pos.y -= g_rain[i].speed * 0.025f;
-            g_rain[i].pos.x += g_wind_turb * 3.5f * 0.025f;
-            g_rain[i].pos.z += (g_wind_turb * 0.5f) * 0.025f;
-
-            if (g_rain[i].pos.y <= -4.2f) {
-                float r_sq = g_rain[i].pos.x * g_rain[i].pos.x + g_rain[i].pos.z * g_rain[i].pos.z;
-                if (r_sq < 22.0f && (g_ash_bed.heat > 0.2f || g_audio_fire_heat > 0.15f)) {
-                    // Rain sizzling into steam
-                    spawn_smoke_3d(g_rain[i].pos, (Vec3){(rand_f()-0.5f)*0.3f, rand_f()*1.2f+0.4f, (rand_f()-0.5f)*0.3f}, 0.24f, 1.4f, 0);
-                    g_audio_steam_rate = fminf(1.0f, g_audio_steam_rate + 0.025f);
-                }
-                g_rain[i].active = false;
-            }
         }
     }
 
@@ -2119,11 +1912,68 @@ static void render_scene(void) {
                 float moisture = hit_log->segments[hit_seg].moisture;
 
                 if (hit_cap) {
-                    float r_q = floorf(hit_rf * 8.0f) / 8.0f;
-                    int ring_band = ((int)(r_q * 8.0f)) % 2;
-                    int col_idx = 1 + ring_band + ((hit_rf > 0.70f) ? 1 : 0) + ((light_val > 0.80f) ? 1 : 0);
-                    if (col_idx > 4) col_idx = 4;
-                    g_shade_buf[y][x] = PALETTE_ENDCAP[col_idx];
+                    // Concentric growth rings with organic radial jitter
+                    float ring_phase = hit_rf * 10.0f + sinf(hit_u * 6.28318f) * 0.35f;
+                    int ring_band = ((int)(ring_phase * 2.0f)) % 2;
+
+                    // Radial wood shrinkage/fire crack fissures radiating from the pith
+                    float fissure = fabsf(sinf(hit_u * 6.0f * (float)M_PI + hit_rf * 1.5f));
+                    bool is_radial_fissure = (fissure < 0.16f && hit_rf > 0.12f);
+                    bool is_sapwood_edge = (hit_rf > 0.82f);
+
+                    if (burn > 0.70f) {
+                        // STAGE: Calcified Ash & Exposed Ember Fissures
+                        if (is_radial_fissure && (glow > 0.08f || seg_temp > 0.22f)) {
+                            float hot = fmaxf(glow, seg_temp * 0.85f);
+                            int emb_idx = (int)(hot * 3.8f);
+                            if (emb_idx < 0) emb_idx = 0;
+                            if (emb_idx > 4) emb_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                        } else {
+                            // Calcified ash mantle
+                            int ash_idx = (int)(light_val * 1.8f + (is_sapwood_edge ? 0.5f : 1.5f));
+                            if (ash_idx < 1) ash_idx = 1;
+                            if (ash_idx > 4) ash_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                        }
+                    } else if (burn > 0.40f) {
+                        // STAGE: Charred Carbon Endcap with Incandescent Crack Veins
+                        if (is_radial_fissure && (glow > 0.10f || seg_temp > 0.35f)) {
+                            float hot = fmaxf(glow, seg_temp * 0.85f);
+                            int emb_idx = (int)(hot * 3.8f);
+                            if (emb_idx < 0) emb_idx = 0;
+                            if (emb_idx > 4) emb_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                        } else {
+                            if (burn > 0.55f && log_norm.y > 0.30f) {
+                                // Light dusting of ash on upper edge
+                                g_shade_buf[y][x] = PALETTE_ASH[1];
+                            } else {
+                                int c_idx = (int)(light_val * 1.8f + (ring_band ? 0 : 1));
+                                if (is_sapwood_edge) c_idx = 0; // Outer edge chars first
+                                if (c_idx < 0) c_idx = 0;
+                                if (c_idx > 4) c_idx = 4;
+                                g_shade_buf[y][x] = PALETTE_CHARRED[c_idx];
+                            }
+                        }
+                    } else if (burn > 0.15f) {
+                        // STAGE: Scorched Sapwood & Darkened Growth Rings
+                        if (is_sapwood_edge || (is_radial_fissure && burn > 0.25f)) {
+                            g_shade_buf[y][x] = PALETTE_CHARRED[0];
+                        } else {
+                            int b_idx = 1 + ring_band + ((light_val > 0.75f) ? 1 : 0);
+                            if (b_idx < 1) b_idx = 1;
+                            if (b_idx > 4) b_idx = 4;
+                            g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                        }
+                    } else {
+                        // STAGE: Fresh Cut Wood with Annual Growth Rings & Pith
+                        int col_idx = 1 + ring_band + (is_sapwood_edge ? 1 : 0) + ((light_val > 0.80f) ? 1 : 0);
+                        if (moisture > 0.08f && col_idx > 1) col_idx--; // Damp darkening
+                        if (col_idx < 1) col_idx = 1;
+                        if (col_idx > 4) col_idx = 4;
+                        g_shade_buf[y][x] = PALETTE_ENDCAP[col_idx];
+                    }
                 } else {
                     float num_plates_u = 14.0f;
                     float num_plates_v = hit_log->length * 2.2f;
@@ -2484,30 +2334,7 @@ static void render_scene(void) {
         }
     }
 
-    // 5. Rain Drops Streaks
-    if (g_rain_active) {
-        for (int i = 0; i < MAX_RAIN; i++) {
-            if (!g_rain[i].active) continue;
-            Vec3 p_rel = vec3_sub(g_rain[i].pos, cam_pos);
-            float rz = vec3_dot(p_rel, fwd);
-            if (rz < 0.5f) continue;
-
-            int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
-            int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
-            if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
-                if (rz < g_depth_buf[sy][sx] + 0.15f) {
-                    g_frame[sy][sx].color = COLOR_RAIN;
-                    g_frame[sy][sx].is_sky = false;
-                    if (sy - 1 >= 0 && rz < g_depth_buf[sy - 1][sx] + 0.15f) {
-                        g_frame[sy - 1][sx].color = COLOR_RAIN;
-                        g_frame[sy - 1][sx].is_sky = false;
-                    }
-                }
-            }
-        }
-    }
-
-    // 6. Ash Flakes Falling in 3D
+    // 5. Ash Flakes Falling in 3D
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
             Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
@@ -2640,13 +2467,10 @@ static void present_frame(void) {
     if (g_stack_mode == 1) mode_name = "Tenda Cônica";
     else if (g_stack_mode == 2) mode_name = "Pirâmide";
 
-    const char *audio_str = g_audio_mute ? "\033[1;31m[MUTED]\033[0m" : "\033[1;32m[ON]\033[0m";
-    const char *weather_str = g_rain_active ? "\033[1;36mChuva 🌧\033[0m" : "\033[1;33mSeco ☀\033[0m";
-
     if (g_show_hud) {
         buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Som: %s | Clima: %s | [F] Lenha [P] Chuva [M] Áudio [L] Pilha [+/-] Vel [C] Colapso [Q] Sair ",
-            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name, audio_str, weather_str);
+            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | [F] Lenha [L] Pilha [+/-] Vel [C] Colapso [T] Órbita [Q] Sair ",
+            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name);
     }
 
     if (buf_len > 0) {
@@ -2686,10 +2510,6 @@ static void handle_input(void) {
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'f' || ch == 'F') {
             stoke_fire_add_wood();
-        } else if (ch == 'p' || ch == 'P') {
-            g_rain_active = !g_rain_active;
-        } else if (ch == 'm' || ch == 'M') {
-            g_audio_mute = !g_audio_mute;
         } else if (ch == 'l' || ch == 'L') {
             g_stack_mode = (g_stack_mode + 1) % 3;
             init_scene();
@@ -2746,7 +2566,6 @@ int main(int argc, char **argv) {
         float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
         if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
-        if (argc > 7 && strcmp(argv[7], "rain") == 0) g_rain_active = true;
         g_time_scale = 30.0f; // Fast advance for headless snapshot rendering
         while (g_sim_time < target_sim) {
             update_simulation();
@@ -2770,7 +2589,6 @@ int main(int argc, char **argv) {
     setup_terminal();
     update_dimensions();
     init_scene();
-    start_audio_engine();
 
     struct timespec ts;
     while (g_running) {
@@ -2790,6 +2608,5 @@ int main(int argc, char **argv) {
         nanosleep(&ts, NULL);
     }
 
-    stop_audio_engine();
     return 0;
 }
