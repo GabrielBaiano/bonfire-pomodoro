@@ -28,6 +28,7 @@
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <signal.h>
+#include <pthread.h>
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -37,6 +38,8 @@
 #define MAX_PIXEL_ROWS 180
 #define MAX_SPARKS 256
 #define MAX_ASH_FLAKES 128
+#define MAX_SMOKE 80
+#define MAX_RAIN 160
 #define MAX_LOGS 16
 #define MAX_STONES 24
 #define NUM_LOG_SEGS 10
@@ -124,6 +127,27 @@ static const RGB PALETTE_LEAF[] = {
     {20, 15, 12}      // 5: Carbonized black leaf soot
 };
 
+// Volumetric Steam & Smoke Palettes
+static const RGB PALETTE_STEAM[] = {
+    {125, 135, 148},  // 0: Deep steam shadow
+    {168, 178, 192},  // 1: Mid cool steam
+    {212, 220, 230}   // 2: Bright vapor highlight
+};
+
+static const RGB PALETTE_SMOKE[] = {
+    {36, 40, 48},     // 0: Dark soot smoke
+    {58, 64, 76},     // 1: Mid blue-grey pyrolytic smoke
+    {88, 94, 110}     // 2: Light billowing smoke
+};
+
+static const RGB PALETTE_SOOT_PUFF[] = {
+    {16, 14, 14},     // 0: Black soot
+    {28, 25, 25},     // 1: Charcoal dust
+    {46, 42, 42}      // 2: Ash puff
+};
+
+static const RGB COLOR_RAIN = {165, 190, 220};
+
 typedef struct {
     float x, y, z;
 } Vec3;
@@ -154,6 +178,11 @@ typedef struct {
     float sag_amount;                  // Center bowing deflection under gravity
     float roll_angle;                  // Tipping angle as resting supports burn
     bool snapped;                      // True if center fiber has structurally fractured
+    bool fractured;                    // True if split into two sub-cylinders
+    float fracture_prog;               // Progress of split displacement [0.0, 1.0]
+    Vec3 break_p;                      // Dynamic break point position
+    Vec3 break_p_orig;                 // Initial break point
+    Vec3 break_p_target;               // Final settled break point
 } Cylinder3D;
 
 typedef struct {
@@ -221,6 +250,23 @@ typedef struct {
 } AshFlake;
 
 typedef struct {
+    Vec3 pos;
+    Vec3 vel;
+    float size;
+    float life;
+    float max_life;
+    int type; // 0: Steam, 1: Wood smoke, 2: Soot puff
+    bool active;
+} SmokeParticle;
+
+typedef struct {
+    Vec3 pos;
+    float speed;
+    float length;
+    bool active;
+} RainDrop;
+
+typedef struct {
     RGB color;
     bool is_sky;
 } Pixel;
@@ -253,6 +299,8 @@ static float g_burnt_mass = 0.0f;     // Total fractional burned mass across hea
 // 3D Particles
 static Spark g_sparks[MAX_SPARKS];
 static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
+static SmokeParticle g_smoke[MAX_SMOKE];
+static RainDrop g_rain[MAX_RAIN];
 
 // 3D Logs & Stacking Modes
 static Cylinder3D g_logs[MAX_LOGS];
@@ -282,9 +330,20 @@ static bool g_realtime_mode = true;   // Realtime 1.0x vs Fast Demo 30.0x
 static bool g_show_hud = true;        // Display status header and physical clock
 static float g_wind = 0.0f;
 static float g_wind_target = 0.0f;
+static float g_wind_turb = 0.0f;
+static bool g_rain_active = false;
 static float g_collapse_progress = 0.0f;
 static bool g_force_collapse = false;
 static bool g_paused = false;
+
+// Audio Engine State
+static pthread_t g_audio_thread;
+static volatile bool g_audio_running = false;
+static volatile bool g_audio_mute = false;
+static volatile float g_audio_fire_heat = 0.0f;
+static volatile float g_audio_steam_rate = 0.0f;
+static volatile int g_audio_pop_trigger = 0;
+static volatile float g_audio_rain_intensity = 0.0f;
 
 // PRNG
 static uint32_t g_rng = 0x8542b821;
@@ -363,6 +422,11 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->sag_amount = 0.0f;
     c->roll_angle = 0.0f;
     c->snapped = false;
+    c->fractured = false;
+    c->fracture_prog = 0.0f;
+    c->break_p = vec3_scale(vec3_add(p1, p2), 0.5f);
+    c->break_p_orig = c->break_p;
+    c->break_p_target = (Vec3){ c->break_p.x, -4.2f + radius, c->break_p.z };
     for (int s = 0; s < NUM_LOG_SEGS; s++) {
         c->segments[s].temp = 0.0f;
         c->segments[s].moisture = 0.18f; // 18% moisture content
@@ -426,12 +490,154 @@ static void build_kindling(void) {
     init_leaf(&g_leaves[4], OBJ_LEAF_BASE + 4, (Vec3){ 0.1f, -3.25f, -0.25f}, (Vec3){ 0.1f, 0.9f, -0.2f}, 0.26f, 0.40f);
 }
 
+static void* audio_synth_thread(void *arg) {
+    (void)arg;
+    FILE *pipe = popen("aplay -q -f S16_LE -r 44100 -c 1 2>/dev/null || pw-play --format=s16le --rate=44100 --channels=1 2>/dev/null || paplay --raw --format=s16le --rate=44100 --channels=1 2>/dev/null", "w");
+
+    #define AUDIO_CHUNK 512
+    int16_t pcm_buf[AUDIO_CHUNK];
+
+    float roar_lp = 0.0f;
+    float roar_phase = 0.0f;
+    float steam_hp = 0.0f;
+    float steam_bp = 0.0f;
+
+    struct {
+        float phase;
+        float freq;
+        float amp;
+        float decay;
+        bool active;
+    } snaps[4];
+    memset(snaps, 0, sizeof(snaps));
+
+    uint32_t a_rng = 0x12345678;
+
+    while (g_audio_running) {
+        if (!pipe || g_audio_mute) {
+            struct timespec req = {0, 11600000L}; // ~11.6ms for 512 samples
+            nanosleep(&req, NULL);
+            if (!g_audio_running) break;
+            continue;
+        }
+
+        float heat = g_audio_fire_heat;
+        float steam_target = g_audio_steam_rate;
+        float rain_intensity = g_audio_rain_intensity;
+        int pop_trig = g_audio_pop_trigger;
+        if (pop_trig > 0) {
+            g_audio_pop_trigger = 0;
+            for (int i = 0; i < 4 && pop_trig > 0; i++) {
+                if (!snaps[i].active) {
+                    a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
+                    float rf = (a_rng & 0xFFFF) / 65536.0f;
+                    snaps[i].active = true;
+                    snaps[i].phase = 0.0f;
+                    snaps[i].freq = 300.0f + rf * 700.0f;
+                    snaps[i].amp = 0.45f + rf * 0.35f;
+                    snaps[i].decay = 0.00012f + rf * 0.00015f;
+                    pop_trig--;
+                }
+            }
+        }
+
+        if (heat > 0.15f) {
+            a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
+            float rf = (a_rng & 0xFFFF) / 65536.0f;
+            if (rf < (0.0010f * heat)) {
+                for (int i = 0; i < 4; i++) {
+                    if (!snaps[i].active) {
+                        snaps[i].active = true;
+                        snaps[i].phase = 0.0f;
+                        snaps[i].freq = 350.0f + rf * 850.0f;
+                        snaps[i].amp = 0.22f + rf * 0.30f;
+                        snaps[i].decay = 0.00015f + rf * 0.00020f;
+                        break;
+                    }
+                }
+            }
+        }
+
+        for (int n = 0; n < AUDIO_CHUNK; n++) {
+            a_rng ^= a_rng << 13; a_rng ^= a_rng >> 17; a_rng ^= a_rng << 5;
+            float white = ((int32_t)(a_rng & 0xFFFF) - 32768) / 32768.0f;
+
+            // 1. Low Convection Roar (Brownian / Lowpass)
+            float lp_coeff = 0.010f + 0.018f * heat;
+            roar_lp += (white - roar_lp) * lp_coeff;
+            roar_phase += 2.0f * (float)M_PI * 0.8f / 44100.0f;
+            if (roar_phase > 2.0f * (float)M_PI) roar_phase -= 2.0f * (float)M_PI;
+            float roar_mod = 0.85f + 0.15f * sinf(roar_phase);
+            float roar_out = roar_lp * heat * 0.55f * roar_mod;
+
+            // 2. Steam Sizzle / Hiss (Bandpass ~2-4 kHz)
+            steam_hp += (white - steam_hp) * 0.40f;
+            float high_sig = white - steam_hp;
+            steam_bp += (high_sig - steam_bp) * 0.18f;
+            float steam_out = steam_bp * fminf(1.0f, steam_target + rain_intensity * 0.40f) * 0.28f;
+
+            // 3. Rain Drizzle
+            float rain_out = 0.0f;
+            if (rain_intensity > 0.01f) {
+                rain_out = white * 0.035f * rain_intensity;
+            }
+
+            // 4. Snaps / Crackles
+            float snap_out = 0.0f;
+            for (int i = 0; i < 4; i++) {
+                if (snaps[i].active) {
+                    snaps[i].phase += 2.0f * (float)M_PI * snaps[i].freq / 44100.0f;
+                    float s_sig = (sinf(snaps[i].phase) + (white * 0.35f)) * snaps[i].amp;
+                    snap_out += s_sig;
+                    snaps[i].amp -= snaps[i].amp * snaps[i].decay * 44100.0f / 512.0f;
+                    if (snaps[i].amp <= 0.005f) {
+                        snaps[i].active = false;
+                    }
+                }
+            }
+
+            float mix = roar_out + steam_out + rain_out + snap_out;
+            if (mix > 1.0f) mix = 1.0f;
+            if (mix < -1.0f) mix = -1.0f;
+            pcm_buf[n] = (int16_t)(mix * 32000.0f);
+        }
+
+        size_t written = fwrite(pcm_buf, sizeof(int16_t), AUDIO_CHUNK, pipe);
+        if (written < AUDIO_CHUNK) {
+            struct timespec req = {0, 5000000L};
+            nanosleep(&req, NULL);
+        } else {
+            fflush(pipe);
+        }
+    }
+
+    if (pipe) {
+        pclose(pipe);
+    }
+    return NULL;
+}
+
+static void start_audio_engine(void) {
+    if (!g_audio_running) {
+        g_audio_running = true;
+        pthread_create(&g_audio_thread, NULL, audio_synth_thread, NULL);
+    }
+}
+
+static void stop_audio_engine(void) {
+    if (g_audio_running) {
+        g_audio_running = false;
+        pthread_join(g_audio_thread, NULL);
+    }
+}
+
 static void safe_write(int fd, const void *buf, size_t count) {
     ssize_t ret = write(fd, buf, count);
     (void)ret;
 }
 
 static void reset_terminal(void) {
+    stop_audio_engine();
     safe_write(STDOUT_FILENO, "\033[?1049l\033[?25h\033[0m\n", 17);
     tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
 }
@@ -771,6 +977,8 @@ static void init_scene(void) {
     memset(g_fire_z, 0, sizeof(g_fire_z));
     memset(g_sparks, 0, sizeof(g_sparks));
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
+    memset(g_smoke, 0, sizeof(g_smoke));
+    memset(g_rain, 0, sizeof(g_rain));
 
     g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
     g_ash_bed.radius_xz = 4.8f;
@@ -796,35 +1004,42 @@ static void init_scene(void) {
     }
 }
 
-static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
-                               float *out_t, Vec3 *out_pt, Vec3 *out_norm,
-                               float *out_u, float *out_v, bool *out_endcap, float *out_rf,
-                               int *out_seg_idx) {
+static bool intersect_sub_cylinder(Vec3 p1, Vec3 p2, float radius, float sag_amount,
+                                   Vec3 ray_orig, Vec3 ray_dir,
+                                   float *out_t, Vec3 *out_pt, Vec3 *out_norm,
+                                   float *out_u, float *out_v, bool *out_endcap, float *out_rf,
+                                   bool test_cap1, bool test_cap2) {
+    Vec3 axis = vec3_sub(p2, p1);
+    float length = vec3_len(axis);
+    if (length < 1e-4f) return false;
+    Vec3 dir = vec3_scale(axis, 1.0f / length);
+
+    Vec3 ref_up = (Vec3){0.0f, 1.0f, 0.0f};
+    if (fabsf(vec3_dot(ref_up, dir)) > 0.88f) {
+        ref_up = (Vec3){1.0f, 0.0f, 0.0f};
+    }
+    Vec3 tangent = vec3_norm(vec3_cross(dir, ref_up));
+    Vec3 bitangent = vec3_cross(dir, tangent);
+
     float best_t = 1e9f;
     bool hit = false;
     Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
-    float best_u = 0, best_v = 0, best_rf = 1.0f;
-    int best_seg = 0;
+    float best_u = 0.0f, best_v = 0.0f, best_rf = 1.0f;
     bool is_cap = false;
 
-    // Tube Body with Parabolic Gravity Sag Deflection
-    // If c->sag_amount > 0.01f, the cylinder axis bows downwards:
-    // delta_y(v) = - 4.0f * v * (1.0f - v) * c->sag_amount
-    int max_passes = (c->sag_amount > 0.01f) ? 2 : 1;
+    int max_passes = (sag_amount > 0.01f) ? 2 : 1;
     for (int pass = 0; pass < max_passes; pass++) {
         Vec3 ro = ray_orig;
-        if (pass == 1) {
-            ro.y += c->sag_amount * 0.75f;
-        }
+        if (pass == 1) ro.y += sag_amount * 0.75f;
 
-        Vec3 delta_p = vec3_sub(ro, c->p1);
-        Vec3 d_proj = vec3_sub(ray_dir, vec3_scale(c->dir, vec3_dot(ray_dir, c->dir)));
-        Vec3 dp_proj = vec3_sub(delta_p, vec3_scale(c->dir, vec3_dot(delta_p, c->dir)));
+        Vec3 delta_p = vec3_sub(ro, p1);
+        Vec3 d_proj = vec3_sub(ray_dir, vec3_scale(dir, vec3_dot(ray_dir, dir)));
+        Vec3 dp_proj = vec3_sub(delta_p, vec3_scale(dir, vec3_dot(delta_p, dir)));
 
         float a = vec3_dot(d_proj, d_proj);
         if (a > 1e-6f) {
             float b = 2.0f * vec3_dot(d_proj, dp_proj);
-            float cv = vec3_dot(dp_proj, dp_proj) - c->radius * c->radius;
+            float cv = vec3_dot(dp_proj, dp_proj) - radius * radius;
             float disc = b * b - 4.0f * a * cv;
             if (disc >= 0.0f) {
                 float sdisc = sqrtf(disc);
@@ -833,31 +1048,26 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                 float t = (t0 > 0.1f) ? t0 : t1;
                 if (t > 0.1f && t < best_t) {
                     Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
-                    float h = vec3_dot(vec3_sub(pt, c->p1), c->dir);
-                    if (h >= 0.0f && h <= c->length) {
-                        float v = h / c->length;
-                        float sag_y = (c->sag_amount > 0.01f) ? (4.0f * v * (1.0f - v) * c->sag_amount) : 0.0f;
-                        Vec3 axis_pt = vec3_add(c->p1, vec3_scale(c->dir, h));
+                    float h = vec3_dot(vec3_sub(pt, p1), dir);
+                    if (h >= 0.0f && h <= length) {
+                        float v = h / length;
+                        float sag_y = (sag_amount > 0.01f) ? (4.0f * v * (1.0f - v) * sag_amount) : 0.0f;
+                        Vec3 axis_pt = vec3_add(p1, vec3_scale(dir, h));
                         axis_pt.y -= sag_y;
 
                         Vec3 d_axis = vec3_sub(pt, axis_pt);
                         float dist_to_axis = vec3_len(d_axis);
-                        if (dist_to_axis <= c->radius * 1.15f) {
-                            if (pt.y < -4.24f) continue; // Below dirt floor level
+                        if (dist_to_axis <= radius * 1.15f) {
+                            if (pt.y < -4.24f) continue;
                             Vec3 norm = vec3_scale(d_axis, 1.0f / (dist_to_axis + 1e-6f));
-                            float angle = atan2f(vec3_dot(norm, c->bitangent), vec3_dot(norm, c->tangent));
+                            float angle = atan2f(vec3_dot(norm, bitangent), vec3_dot(norm, tangent));
                             float u = (angle + (float)M_PI) / (2.0f * (float)M_PI);
-
-                            int seg = (int)(v * NUM_LOG_SEGS);
-                            if (seg < 0) seg = 0;
-                            if (seg >= NUM_LOG_SEGS) seg = NUM_LOG_SEGS - 1;
 
                             best_t = t;
                             best_pt = pt;
                             best_norm = norm;
                             best_u = u;
                             best_v = v;
-                            best_seg = seg;
                             is_cap = false;
                             hit = true;
                             break;
@@ -868,44 +1078,44 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
         }
     }
 
-    // End-cap P1 (-c->dir)
-    float denom1 = vec3_dot(ray_dir, vec3_scale(c->dir, -1.0f));
-    if (fabsf(denom1) > 1e-5f) {
-        float t = vec3_dot(vec3_sub(c->p1, ray_orig), vec3_scale(c->dir, -1.0f)) / denom1;
-        if (t > 0.1f && t < best_t) {
-            Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
-            float r = vec3_len(vec3_sub(pt, c->p1));
-            if (r <= c->radius && pt.y >= -4.24f) {
-                best_t = t;
-                best_pt = pt;
-                best_norm = vec3_scale(c->dir, -1.0f);
-                best_u = 0.0f;
-                best_v = 0.0f;
-                best_rf = r / c->radius;
-                best_seg = 0;
-                is_cap = true;
-                hit = true;
+    if (test_cap1) {
+        float denom1 = vec3_dot(ray_dir, vec3_scale(dir, -1.0f));
+        if (fabsf(denom1) > 1e-5f) {
+            float t = vec3_dot(vec3_sub(p1, ray_orig), vec3_scale(dir, -1.0f)) / denom1;
+            if (t > 0.1f && t < best_t) {
+                Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
+                float r = vec3_len(vec3_sub(pt, p1));
+                if (r <= radius && pt.y >= -4.24f) {
+                    best_t = t;
+                    best_pt = pt;
+                    best_norm = vec3_scale(dir, -1.0f);
+                    best_u = 0.0f;
+                    best_v = 0.0f;
+                    best_rf = r / radius;
+                    is_cap = true;
+                    hit = true;
+                }
             }
         }
     }
 
-    // End-cap P2 (+c->dir)
-    float denom2 = vec3_dot(ray_dir, c->dir);
-    if (fabsf(denom2) > 1e-5f) {
-        float t = vec3_dot(vec3_sub(c->p2, ray_orig), c->dir) / denom2;
-        if (t > 0.1f && t < best_t) {
-            Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
-            float r = vec3_len(vec3_sub(pt, c->p2));
-            if (r <= c->radius) {
-                best_t = t;
-                best_pt = pt;
-                best_norm = c->dir;
-                best_u = 0.0f;
-                best_v = 1.0f;
-                best_rf = r / c->radius;
-                best_seg = NUM_LOG_SEGS - 1;
-                is_cap = true;
-                hit = true;
+    if (test_cap2) {
+        float denom2 = vec3_dot(ray_dir, dir);
+        if (fabsf(denom2) > 1e-5f) {
+            float t = vec3_dot(vec3_sub(p2, ray_orig), dir) / denom2;
+            if (t > 0.1f && t < best_t) {
+                Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
+                float r = vec3_len(vec3_sub(pt, p2));
+                if (r <= radius) {
+                    best_t = t;
+                    best_pt = pt;
+                    best_norm = dir;
+                    best_u = 0.0f;
+                    best_v = 1.0f;
+                    best_rf = r / radius;
+                    is_cap = true;
+                    hit = true;
+                }
             }
         }
     }
@@ -918,9 +1128,76 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
         *out_v = best_v;
         *out_endcap = is_cap;
         *out_rf = best_rf;
-        *out_seg_idx = best_seg;
     }
     return hit;
+}
+
+static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
+                               float *out_t, Vec3 *out_pt, Vec3 *out_norm,
+                               float *out_u, float *out_v, bool *out_endcap, float *out_rf,
+                               int *out_seg_idx) {
+    if (!c->fractured) {
+        float t, u, v, rf;
+        Vec3 pt, norm;
+        bool is_cap;
+        if (intersect_sub_cylinder(c->p1, c->p2, c->radius, c->sag_amount, ray_orig, ray_dir,
+                                   &t, &pt, &norm, &u, &v, &is_cap, &rf, true, true)) {
+            int seg = (int)(v * NUM_LOG_SEGS);
+            if (seg < 0) seg = 0;
+            if (seg >= NUM_LOG_SEGS) seg = NUM_LOG_SEGS - 1;
+            *out_t = t; *out_pt = pt; *out_norm = norm;
+            *out_u = u; *out_v = v; *out_endcap = is_cap;
+            *out_rf = rf; *out_seg_idx = seg;
+            return true;
+        }
+        return false;
+    }
+
+    // Fractured cylinder: test both sub-halves
+    float best_t = 1e9f;
+    bool hit = false;
+    Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
+    float best_u = 0.0f, best_v = 0.0f, best_rf = 1.0f;
+    bool best_cap = false;
+    int best_seg = 0;
+
+    // Sub A: p1 -> break_p (segments 0..4)
+    float tA, uA, vA, rfA;
+    Vec3 ptA, normA;
+    bool capA;
+    if (intersect_sub_cylinder(c->p1, c->break_p, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
+                               &tA, &ptA, &normA, &uA, &vA, &capA, &rfA, true, true)) {
+        if (tA < best_t) {
+            best_t = tA; best_pt = ptA; best_norm = normA;
+            best_u = uA; best_v = vA * 0.5f; best_cap = capA; best_rf = rfA;
+            best_seg = (int)(vA * (NUM_LOG_SEGS / 2));
+            if (best_seg >= NUM_LOG_SEGS / 2) best_seg = NUM_LOG_SEGS / 2 - 1;
+            hit = true;
+        }
+    }
+
+    // Sub B: break_p -> p2 (segments 5..9)
+    float tB, uB, vB, rfB;
+    Vec3 ptB, normB;
+    bool capB;
+    if (intersect_sub_cylinder(c->break_p, c->p2, c->radius * 0.95f, 0.0f, ray_orig, ray_dir,
+                               &tB, &ptB, &normB, &uB, &vB, &capB, &rfB, true, true)) {
+        if (tB < best_t) {
+            best_t = tB; best_pt = ptB; best_norm = normB;
+            best_u = uB; best_v = 0.5f + vB * 0.5f; best_cap = capB; best_rf = rfB;
+            best_seg = (NUM_LOG_SEGS / 2) + (int)(vB * (NUM_LOG_SEGS - NUM_LOG_SEGS / 2));
+            if (best_seg >= NUM_LOG_SEGS) best_seg = NUM_LOG_SEGS - 1;
+            hit = true;
+        }
+    }
+
+    if (hit) {
+        *out_t = best_t; *out_pt = best_pt; *out_norm = best_norm;
+        *out_u = best_u; *out_v = best_v; *out_endcap = best_cap;
+        *out_rf = best_rf; *out_seg_idx = best_seg;
+        return true;
+    }
+    return false;
 }
 
 static void spawn_spark_3d(Vec3 pos, Vec3 vel, int life, RGB color) {
@@ -949,6 +1226,98 @@ static void spawn_ash_3d(Vec3 pos, Vec3 vel, RGB color) {
     }
 }
 
+static void spawn_smoke_3d(Vec3 pos, Vec3 vel, float size, float life, int type) {
+    for (int i = 0; i < MAX_SMOKE; i++) {
+        if (!g_smoke[i].active) {
+            g_smoke[i].pos = pos;
+            g_smoke[i].vel = vel;
+            g_smoke[i].size = size;
+            g_smoke[i].life = life;
+            g_smoke[i].max_life = life;
+            g_smoke[i].type = type;
+            g_smoke[i].active = true;
+            break;
+        }
+    }
+}
+
+static void spawn_rain_drop(void) {
+    for (int i = 0; i < MAX_RAIN; i++) {
+        if (!g_rain[i].active) {
+            g_rain[i].pos = (Vec3){
+                (rand_f() - 0.5f) * 16.0f,
+                rand_f() * 4.0f + 8.0f,
+                (rand_f() - 0.5f) * 16.0f
+            };
+            g_rain[i].speed = rand_f() * 6.0f + 20.0f;
+            g_rain[i].length = rand_f() * 0.35f + 0.35f;
+            g_rain[i].active = true;
+            break;
+        }
+    }
+}
+
+static void stoke_fire_add_wood(void) {
+    g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.40f);
+
+    // Revive kindling
+    for (int i = 0; i < g_num_twigs; i++) {
+        if (!g_twigs[i].active) {
+            g_twigs[i].active = true;
+            g_twigs[i].burn_progress = 0.0f;
+            g_twigs[i].moisture = 0.05f;
+            g_twigs[i].temp = 0.45f;
+        }
+    }
+    for (int l = 0; l < g_num_leaves; l++) {
+        if (!g_leaves[l].active) {
+            g_leaves[l].active = true;
+            g_leaves[l].burn_progress = 0.0f;
+            g_leaves[l].temp = 0.55f;
+        }
+    }
+
+    // Add fresh log or replace consumed log
+    int target_slot = -1;
+    if (g_num_logs < MAX_LOGS) {
+        target_slot = g_num_logs;
+        g_num_logs++;
+    } else {
+        float min_mass = 999.0f;
+        int min_idx = 0;
+        for (int i = 0; i < g_num_logs; i++) {
+            float m = 0.0f;
+            for (int s = 0; s < NUM_LOG_SEGS; s++) m += g_logs[i].segments[s].structural_mass;
+            if (m < min_mass) {
+                min_mass = m;
+                min_idx = i;
+            }
+        }
+        target_slot = min_idx;
+    }
+
+    if (target_slot >= 0) {
+        float angle = rand_f() * (float)M_PI;
+        float dist = 2.4f;
+        Vec3 p1 = (Vec3){ cosf(angle) * dist, -2.4f, sinf(angle) * dist };
+        Vec3 p2 = (Vec3){ -cosf(angle) * dist, -2.2f, -sinf(angle) * dist };
+        Vec3 p1_col = (Vec3){ p1.x * 0.9f, -3.9f, p1.z * 0.9f };
+        Vec3 p2_col = (Vec3){ p2.x * 0.9f, -3.9f, p2.z * 0.9f };
+        init_cylinder(&g_logs[target_slot], 100 + target_slot, p1, p2, p1_col, p2_col, 0.48f, 0.0f);
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            g_logs[target_slot].segments[s].moisture = 0.12f;
+            g_logs[target_slot].segments[s].temp = 0.20f;
+        }
+    }
+
+    g_audio_pop_trigger += 4;
+    Vec3 hearth_c = (Vec3){0.0f, -3.5f, 0.0f};
+    for (int sp = 0; sp < 28; sp++) {
+        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.8f, rand_f() * 4.0f + 2.0f, (rand_f() - 0.5f) * 2.8f};
+        spawn_spark_3d(hearth_c, sp_v, rand_range(20, 50), PALETTE_EMBERS[rand_range(2, 4)]);
+    }
+}
+
 static void update_simulation(void) {
     if (g_paused) return;
 
@@ -959,11 +1328,12 @@ static void update_simulation(void) {
     g_sim_time += dt;
     g_anim_time += 0.025f;
 
-    // Ambient Wind oscillation
+    // Ambient Wind oscillation & non-linear turbulence
     if (rand_f() < 0.05f) {
         g_wind_target = (rand_f() - 0.5f) * 1.8f;
     }
     g_wind += (g_wind_target - g_wind) * 0.04f;
+    g_wind_turb = sinf(g_sim_time * 1.5f) * 0.35f + sinf(g_sim_time * 0.45f) * 0.5f + g_wind;
 
     // Auto-turntable continuous orbit
     if (g_auto_turntable) {
@@ -972,26 +1342,23 @@ static void update_simulation(void) {
     }
 
     // Sub-stepping for numerical stability:
-    // Guarantees stable diffusion & evaporation equations regardless of speed
     float sub_dt_target = 0.025f;
     int num_substeps = (int)ceilf(dt / sub_dt_target);
     if (num_substeps < 1) num_substeps = 1;
     if (num_substeps > 120) num_substeps = 120;
     float step_dt = dt / (float)num_substeps;
 
-    // Kindling nest position
     Vec3 kindle_pos = (Vec3){0.0f, -2.6f, 0.0f};
+
+    // Track frame total evaporation for audio steam hiss
+    float frame_evap_rate = 0.0f;
 
     for (int step = 0; step < num_substeps; step++) {
         float cur_sim_t = g_sim_time - dt + (step + 1) * step_dt;
         float kindle_heat = 0.0f;
         if (cur_sim_t < 240.0f) {
-            // Kindling stays hot for first 60s (tinder/paper phase), then decays over 180s
-            if (cur_sim_t < 60.0f) {
-                kindle_heat = 1.0f;
-            } else {
-                kindle_heat = fmaxf(0.0f, 1.0f - ((cur_sim_t - 60.0f) / 180.0f));
-            }
+            if (cur_sim_t < 60.0f) kindle_heat = 1.0f;
+            else kindle_heat = fmaxf(0.0f, 1.0f - ((cur_sim_t - 60.0f) / 180.0f));
         }
 
         // ---------------------------------------------------------------------
@@ -1002,17 +1369,15 @@ static void update_simulation(void) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
 
-                // Parabolic gravity sagging deflection on segment position
                 if (g_logs[i].sag_amount > 0.01f) {
                     seg_p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
                 }
 
-                // Radial distance from hearth center axis (0, y, 0)
                 float r_seg = sqrtf(seg_p.x * seg_p.x + seg_p.z * seg_p.z);
                 float r_norm = r_seg / 3.6f;
                 float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
 
-                // 1. Initial kindling nest heat (concentrated in center core)
+                // 1. Initial kindling nest heat
                 if (kindle_heat > 0.02f) {
                     float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
                     float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.5f);
@@ -1021,7 +1386,7 @@ static void update_simulation(void) {
                     }
                 }
 
-                // 2. Ash bed radiant ember heat (fuels logs from below in center)
+                // 2. Ash bed radiant ember heat
                 if (g_ash_bed.heat > 0.15f && seg_p.y < 0.2f) {
                     float bed_dy = fmaxf(0.0f, seg_p.y - g_ash_bed.center.y);
                     if (bed_dy < 3.2f) {
@@ -1030,7 +1395,7 @@ static void update_simulation(void) {
                     }
                 }
 
-                // 3. Cross-log fire radiation from actively burning segments within draft core
+                // 3. Cross-log fire radiation
                 for (int j = 0; j < g_num_logs; j++) {
                     if (i == j) continue;
                     for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
@@ -1048,10 +1413,22 @@ static void update_simulation(void) {
                 }
 
                 // 4. Moisture Evaporation & Latent Heat Clamping
+                float evap = 0.0f;
                 if (g_logs[i].segments[s].temp > 0.08f && g_logs[i].segments[s].moisture > 0.001f) {
-                    float evap = (0.0018f * (g_logs[i].segments[s].temp - 0.05f) + 0.0030f * kindle_heat * eta_r) * step_dt;
+                    evap = (0.0018f * (g_logs[i].segments[s].temp - 0.05f) + 0.0030f * kindle_heat * eta_r) * step_dt;
                     if (evap > g_logs[i].segments[s].moisture) evap = g_logs[i].segments[s].moisture;
                     g_logs[i].segments[s].moisture -= evap;
+                    frame_evap_rate += evap * 15.0f;
+
+                    // Emit fluffy white steam particle
+                    if (rand_f() < (0.12f * step_dt * 40.0f)) {
+                        Vec3 steam_v = (Vec3){
+                            (rand_f() - 0.5f) * 0.6f + g_wind_turb * 0.5f,
+                            rand_f() * 1.5f + 0.8f,
+                            (rand_f() - 0.5f) * 0.6f
+                        };
+                        spawn_smoke_3d(seg_p, steam_v, 0.32f, 2.8f, 0);
+                    }
                 }
                 if (g_logs[i].segments[s].moisture > 0.03f) {
                     if (g_logs[i].segments[s].temp > 0.28f) {
@@ -1059,7 +1436,7 @@ static void update_simulation(void) {
                     }
                 }
 
-                // 5. Conservative 1D thermal diffusion along wood grain (insulated by char crust)
+                // 5. Conservative 1D thermal diffusion along wood grain
                 float cur = g_logs[i].segments[s].temp;
                 float prev_t = (s > 0) ? g_logs[i].segments[s-1].temp : cur;
                 float next_t = (s < NUM_LOG_SEGS - 1) ? g_logs[i].segments[s+1].temp : cur;
@@ -1067,33 +1444,44 @@ static void update_simulation(void) {
                 float k_eff = 0.0018f * (1.0f - 0.65f * g_logs[i].segments[s].burn_progress);
                 g_logs[i].segments[s].temp += k_eff * laplacian * step_dt;
 
-                // 6. Ambient convective cooling (outer ends exposed to cold air cool down rapidly)
+                // 6. Ambient convective cooling
                 float cool_factor = 1.0f - 0.75f * eta_r;
                 g_logs[i].segments[s].temp -= 0.00025f * cur * cool_factor * step_dt;
 
-                // 7. Active combustion & Pyrolysis: requires dry wood (moisture <= 0.04) and T > 0.30
+                // 7. Active combustion & Pyrolysis
                 if (g_logs[i].segments[s].moisture <= 0.04f && g_logs[i].segments[s].temp > 0.30f) {
+                    float burn_rate = 0.0f;
                     if (eta_r > 0.05f) {
                         float exo = 0.0016f * (g_logs[i].segments[s].temp - 0.28f) * (0.35f + 0.65f * eta_r) * g_logs[i].segments[s].structural_mass * step_dt;
                         g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + exo);
-                        float burn_rate = 0.00035f * (g_logs[i].segments[s].temp - 0.25f) * (0.25f + 0.75f * eta_r) * step_dt;
+                        burn_rate = 0.00035f * (g_logs[i].segments[s].temp - 0.25f) * (0.25f + 0.75f * eta_r) * step_dt;
                         g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
                     } else {
-                        float burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.25f) * step_dt;
+                        burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.25f) * step_dt;
                         g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
                     }
 
-                    // Update physical structural mass
+                    // Pyrolytic wood smoke particle
+                    if (burn_rate > 0.00001f && rand_f() < (0.08f * step_dt * 40.0f)) {
+                        Vec3 smoke_v = (Vec3){
+                            (rand_f() - 0.5f) * 0.7f + g_wind_turb * 0.7f,
+                            rand_f() * 2.0f + 1.2f,
+                            (rand_f() - 0.5f) * 0.7f
+                        };
+                        spawn_smoke_3d(seg_p, smoke_v, 0.40f, 3.2f, 1);
+                    }
+
+                    // Update structural mass
                     g_logs[i].segments[s].structural_mass = fmaxf(0.0f, 1.0f - g_logs[i].segments[s].burn_progress * 1.25f);
 
-                    // Shed ash flakes as segment becomes crumbly
+                    // Shed ash flakes
                     if (g_logs[i].segments[s].burn_progress > 0.55f && rand_f() < (0.04f * step_dt * 40.0f)) {
                         float angle = rand_f() * 6.28318f;
                         Vec3 rad_dir = vec3_add(vec3_scale(g_logs[i].tangent, cosf(angle)),
                                                 vec3_scale(g_logs[i].bitangent, sinf(angle)));
                         Vec3 ash_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
                         Vec3 vel = (Vec3){
-                            (rand_f() - 0.5f) * 0.3f + g_wind * 0.3f,
+                            (rand_f() - 0.5f) * 0.3f + g_wind_turb * 0.3f,
                             -(rand_f() * 0.25f + 0.15f),
                             (rand_f() - 0.5f) * 0.3f
                         };
@@ -1101,21 +1489,22 @@ static void update_simulation(void) {
                     }
                 }
 
-                // Fuel depletion & calcification
+                // Fuel depletion
                 if (g_logs[i].segments[s].burn_progress > 0.85f) {
                     g_logs[i].segments[s].temp = fmaxf(0.10f, g_logs[i].segments[s].temp - 0.00015f * step_dt);
                 }
                 if (g_logs[i].segments[s].temp < 0.0f) g_logs[i].segments[s].temp = 0.0f;
 
                 // 8. Air Draft & Coal Incandescence
-                float v_air = eta_r * (0.75f + 0.50f * g_logs[i].segments[s].temp) + 0.60f * fabsf(g_wind);
+                float v_air = eta_r * (0.75f + 0.50f * g_logs[i].segments[s].temp) + 0.60f * fabsf(g_wind_turb);
                 float glow = g_logs[i].segments[s].temp * fminf(1.0f, 0.35f + 0.65f * v_air);
                 if (g_logs[i].segments[s].moisture > 0.05f) glow *= 0.15f;
                 g_logs[i].segments[s].glow_intensity = glow;
 
-                // 9. Sap Pocket Pops (Crackling spark bursts)
+                // 9. Sap Pocket Pops
                 if (g_logs[i].segments[s].temp > 0.45f && g_logs[i].segments[s].burn_progress >= 0.15f && g_logs[i].segments[s].burn_progress <= 0.75f) {
                     if (rand_f() < (0.015f * step_dt * 40.0f)) {
+                        g_audio_pop_trigger++;
                         int num_sp = rand_range(6, 10);
                         for (int sp = 0; sp < num_sp; sp++) {
                             float angle = rand_f() * 6.28318f;
@@ -1123,7 +1512,7 @@ static void update_simulation(void) {
                                                     vec3_scale(g_logs[i].bitangent, sinf(angle)));
                             Vec3 sp_p = vec3_add(seg_p, vec3_scale(rad_dir, g_logs[i].radius * 0.95f));
                             Vec3 pop_v = (Vec3){
-                                rad_dir.x * (rand_f() * 3.5f + 2.0f) + g_wind * 1.5f,
+                                rad_dir.x * (rand_f() * 3.5f + 2.0f) + g_wind_turb * 1.5f,
                                 rand_f() * 4.5f + 3.0f,
                                 rad_dir.z * (rand_f() * 3.5f + 2.0f)
                             };
@@ -1135,9 +1524,8 @@ static void update_simulation(void) {
         }
 
         // ---------------------------------------------------------------------
-        // KINDLING LEAVES & TWIGS COMBUSTION (Gravetos e Folhas)
+        // KINDLING LEAVES & TWIGS COMBUSTION
         // ---------------------------------------------------------------------
-        // Fast burning dry leaves: flare quickly, produce sparks, curl & soot
         for (int l = 0; l < g_num_leaves; l++) {
             if (!g_leaves[l].active) continue;
             if (kindle_heat > 0.02f || cur_sim_t < 60.0f) {
@@ -1147,7 +1535,6 @@ static void update_simulation(void) {
                 float leaf_burn = 0.038f * (g_leaves[l].temp - 0.15f) * step_dt;
                 g_leaves[l].burn_progress += leaf_burn;
                 g_leaves[l].temp = fminf(1.0f, g_leaves[l].temp + 0.065f * step_dt);
-                // Dry leaf crackle sparks
                 if (rand_f() < 0.20f * step_dt * 40.0f) {
                     Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 1.8f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 1.8f};
                     spawn_spark_3d(g_leaves[l].pos, sp_v, rand_range(12, 28), PALETTE_EMBERS[rand_range(2, 4)]);
@@ -1158,25 +1545,22 @@ static void update_simulation(void) {
             }
         }
 
-        // Kindling twigs: thin branches that catch in 20-30s, burn hot, ignite main logs
         for (int tw = 0; tw < g_num_twigs; tw++) {
             if (!g_twigs[tw].active) continue;
             if (kindle_heat > 0.02f) {
                 g_twigs[tw].temp += 0.030f * kindle_heat * step_dt;
             }
-            // Heat from leaves
             for (int l = 0; l < g_num_leaves; l++) {
                 if (g_leaves[l].burn_progress > 0.1f && g_leaves[l].active) {
                     float d = vec3_len(vec3_sub(g_leaves[l].pos, g_twigs[tw].p1));
                     if (d < 1.4f) g_twigs[tw].temp += 0.020f * (1.0f - d / 1.4f) * step_dt;
                 }
             }
-            // Evaporation
             if (g_twigs[tw].temp > 0.08f && g_twigs[tw].moisture > 0.001f) {
                 float evap = 0.0065f * (g_twigs[tw].temp - 0.05f) * step_dt;
                 g_twigs[tw].moisture = fmaxf(0.0f, g_twigs[tw].moisture - evap);
+                frame_evap_rate += evap * 20.0f;
             }
-            // Twig ignition & fast combustion
             if (g_twigs[tw].moisture <= 0.04f && g_twigs[tw].temp > 0.25f) {
                 float exo = 0.0050f * (g_twigs[tw].temp - 0.20f) * step_dt;
                 g_twigs[tw].temp = fminf(1.0f, g_twigs[tw].temp + exo);
@@ -1188,7 +1572,6 @@ static void update_simulation(void) {
                 g_twigs[tw].temp = 0.15f;
             }
 
-            // Transfer heat from burning twigs into adjacent big logs!
             if (g_twigs[tw].temp > 0.30f) {
                 Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
                 for (int i = 0; i < g_num_logs; i++) {
@@ -1220,10 +1603,8 @@ static void update_simulation(void) {
         float burnt_mass = 1.0f - avg_mass;
         g_burnt_mass = burnt_mass;
 
-        // Ash bed height: smooth exponential approach to target height
-        // Never recalculate every sub-step directly — smooth to avoid geometry glitch
         float target_height = fminf(1.4f, 0.35f + burnt_mass * 0.85f + g_ash_bed.volume);
-        float smooth_rate = 1.0f - expf(-step_dt * 0.8f); // ~0.8 Hz convergence
+        float smooth_rate = 1.0f - expf(-step_dt * 0.8f);
         g_ash_bed.height += (target_height - g_ash_bed.height) * smooth_rate;
 
         if (active_burning_segs > 0) {
@@ -1250,11 +1631,9 @@ static void update_simulation(void) {
                 support_integrity = fminf(support_integrity, s2_eff);
             }
 
-            // Own central segments integrity
             float own_center_mass = (g_logs[i].segments[4].structural_mass + g_logs[i].segments[5].structural_mass + g_logs[i].segments[6].structural_mass) / 3.0f;
             float log_integrity = fminf(support_integrity, own_center_mass);
 
-            // Gravity sagging calculation
             if (own_center_mass < 0.65f) {
                 g_logs[i].sag_amount = 0.55f * (1.0f - own_center_mass) * (1.0f - own_center_mass);
             }
@@ -1262,12 +1641,21 @@ static void update_simulation(void) {
             // Snap fracture when central mass is structurally exhausted
             if (own_center_mass < 0.22f && !g_logs[i].snapped) {
                 g_logs[i].snapped = true;
-                // Structural break spark burst
+                g_logs[i].fractured = true;
+                g_audio_pop_trigger += 3;
+
                 Vec3 ctr_p = vec3_scale(vec3_add(g_logs[i].p1, g_logs[i].p2), 0.5f);
                 ctr_p.y -= g_logs[i].sag_amount;
-                for (int sp = 0; sp < 12; sp++) {
+
+                // Sparks burst
+                for (int sp = 0; sp < 16; sp++) {
                     Vec3 snap_v = (Vec3){(rand_f() - 0.5f) * 2.5f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 2.5f};
                     spawn_spark_3d(ctr_p, snap_v, rand_range(25, 60), PALETTE_EMBERS[rand_range(2, 4)]);
+                }
+                // Soot smoke puff
+                for (int sk = 0; sk < 8; sk++) {
+                    Vec3 smk_v = (Vec3){(rand_f() - 0.5f) * 1.6f + g_wind_turb * 0.5f, rand_f() * 2.5f + 1.0f, (rand_f() - 0.5f) * 1.6f};
+                    spawn_smoke_3d(ctr_p, smk_v, 0.48f, 3.5f, 2);
                 }
             }
 
@@ -1295,7 +1683,71 @@ static void update_simulation(void) {
             g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
             g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
             g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
+
+            if (g_logs[i].fractured) {
+                if (g_logs[i].fracture_prog < 1.0f) {
+                    g_logs[i].fracture_prog += 0.015f * step_dt * 40.0f;
+                    if (g_logs[i].fracture_prog > 1.0f) g_logs[i].fracture_prog = 1.0f;
+                }
+                float fp = g_logs[i].fracture_prog;
+                g_logs[i].break_p.x = g_logs[i].break_p_orig.x * (1.0f - fp) + g_logs[i].break_p_target.x * fp;
+                g_logs[i].break_p.y = g_logs[i].break_p_orig.y * (1.0f - fp) + g_logs[i].break_p_target.y * fp;
+                g_logs[i].break_p.z = g_logs[i].break_p_orig.z * (1.0f - fp) + g_logs[i].break_p_target.z * fp;
+            }
+
             recompute_cylinder_axes(&g_logs[i]);
+        }
+
+        // Update audio variables
+        float total_heat = (float)active_burning_segs / (float)(g_num_logs * NUM_LOG_SEGS) * 2.2f + g_ash_bed.heat * 0.35f;
+        if (cur_sim_t < 60.0f) total_heat += kindle_heat * 0.45f;
+        g_audio_fire_heat += (fminf(1.0f, total_heat) - g_audio_fire_heat) * 0.08f;
+        g_audio_steam_rate = fmaxf(0.0f, g_audio_steam_rate - 0.005f) + frame_evap_rate;
+        g_audio_rain_intensity += ((g_rain_active ? 1.0f : 0.0f) - g_audio_rain_intensity) * 0.1f;
+    }
+
+    // -------------------------------------------------------------------------
+    // RAIN SIMULATION (Drizzle & Sizzle on Hearth)
+    // -------------------------------------------------------------------------
+    if (g_rain_active) {
+        for (int r = 0; r < 4; r++) spawn_rain_drop();
+    }
+    for (int i = 0; i < MAX_RAIN; i++) {
+        if (g_rain[i].active) {
+            g_rain[i].pos.y -= g_rain[i].speed * 0.025f;
+            g_rain[i].pos.x += g_wind_turb * 3.5f * 0.025f;
+            g_rain[i].pos.z += (g_wind_turb * 0.5f) * 0.025f;
+
+            if (g_rain[i].pos.y <= -4.2f) {
+                float r_sq = g_rain[i].pos.x * g_rain[i].pos.x + g_rain[i].pos.z * g_rain[i].pos.z;
+                if (r_sq < 22.0f && (g_ash_bed.heat > 0.2f || g_audio_fire_heat > 0.15f)) {
+                    // Rain sizzling into steam
+                    spawn_smoke_3d(g_rain[i].pos, (Vec3){(rand_f()-0.5f)*0.3f, rand_f()*1.2f+0.4f, (rand_f()-0.5f)*0.3f}, 0.24f, 1.4f, 0);
+                    g_audio_steam_rate = fminf(1.0f, g_audio_steam_rate + 0.025f);
+                }
+                g_rain[i].active = false;
+            }
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // VOLUMETRIC SMOKE & STEAM SIMULATION
+    // -------------------------------------------------------------------------
+    for (int i = 0; i < MAX_SMOKE; i++) {
+        if (g_smoke[i].active) {
+            g_smoke[i].pos.x += g_smoke[i].vel.x * 0.025f;
+            g_smoke[i].pos.y += g_smoke[i].vel.y * 0.025f;
+            g_smoke[i].pos.z += g_smoke[i].vel.z * 0.025f;
+
+            g_smoke[i].vel.x += (g_wind_turb * 1.5f - g_smoke[i].vel.x * 0.4f) * 0.05f + sinf(g_smoke[i].pos.y * 1.4f + g_anim_time * 2.0f) * 0.012f;
+            g_smoke[i].vel.y = fmaxf(0.35f, g_smoke[i].vel.y * 0.985f);
+            g_smoke[i].vel.z += (rand_f() - 0.5f) * 0.02f;
+
+            g_smoke[i].size += 0.22f * 0.025f;
+            g_smoke[i].life -= 0.025f;
+            if (g_smoke[i].life <= 0.0f || g_smoke[i].pos.y > 12.0f) {
+                g_smoke[i].active = false;
+            }
         }
     }
 
@@ -1360,7 +1812,6 @@ static void update_simulation(void) {
         for (int s = 0; s < NUM_LOG_SEGS; s++) {
             float temp = g_logs[i].segments[s].temp;
             float moisture = g_logs[i].segments[s].moisture;
-            // Only dried segments ignite into open flames!
             if (temp > 0.30f && moisture <= 0.05f) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
@@ -1368,7 +1819,6 @@ static void update_simulation(void) {
                     p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
                 }
 
-                // Radial draft factor
                 float r_seg = sqrtf(p.x * p.x + p.z * p.z);
                 float r_norm = r_seg / 3.4f;
                 float eta_r = fmaxf(0.0f, 1.0f - r_norm * r_norm);
@@ -1400,13 +1850,13 @@ static void update_simulation(void) {
         }
     }
 
-    // 3. Convective flame propagation upwards
+    // 3. Convective flame propagation upwards with wind turbulence
     for (int y = g_pixel_h - 4; y >= 2; y--) {
         for (int x = 0; x < g_pixel_w; x++) {
             int src_x = x;
-            int wind_step = (g_wind > 0.35f) ? 1 : ((g_wind < -0.35f) ? -1 : 0);
+            int wind_step = (g_wind_turb > 0.30f) ? 1 : ((g_wind_turb < -0.30f) ? -1 : 0);
             int jitter = (xorshift32() % 3) - 1;
-            src_x += (rand_f() < 0.40f) ? wind_step : jitter;
+            src_x += (rand_f() < 0.45f) ? wind_step : jitter;
             if (src_x < 0) src_x = 0;
             if (src_x >= g_pixel_w) src_x = g_pixel_w - 1;
 
@@ -1441,7 +1891,7 @@ static void update_simulation(void) {
                 if (g_logs[i].sag_amount > 0.01f) {
                     p.y -= 4.0f * t_val * (1.0f - t_val) * g_logs[i].sag_amount;
                 }
-                Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind * 1.2f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
+                Vec3 spark_v = (Vec3){(rand_f() - 0.5f) * 1.5f + g_wind_turb * 1.4f, rand_f() * 3.2f + 2.0f, (rand_f() - 0.5f) * 1.5f};
                 RGB spark_col = PALETTE_EMBERS[rand_range(2, 4)];
                 spawn_spark_3d(p, spark_v, rand_range(16, 42), spark_col);
                 break;
@@ -1477,7 +1927,6 @@ static void update_simulation(void) {
             if (g_ash_flakes[i].pos.y <= floor_y) {
                 if (r_sq < r_bed * r_bed) {
                     g_ash_bed.volume += 0.002f;
-                    // height is driven by the smoothed target in update_simulation
                 }
                 g_ash_flakes[i].active = false;
             }
@@ -1975,7 +2424,90 @@ static void render_scene(void) {
         }
     }
 
-    // 4. Ash Flakes Falling in 3D
+    // 4. Volumetric Smoke & Steam (3D billboard spheres with Bayer dithering and depth test)
+    for (int i = 0; i < MAX_SMOKE; i++) {
+        if (!g_smoke[i].active) continue;
+        Vec3 p_rel = vec3_sub(g_smoke[i].pos, cam_pos);
+        float sz = vec3_dot(p_rel, fwd);
+        if (sz < 0.5f) continue;
+
+        int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+        int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
+
+        float screen_r = (g_smoke[i].size / world_w) * g_pixel_w * (cam_dist / sz);
+        int rad = (int)ceilf(screen_r);
+        if (rad < 1) rad = 1;
+        if (rad > 14) rad = 14;
+
+        float alpha_fac = (g_smoke[i].life / g_smoke[i].max_life);
+
+        for (int dy = -rad; dy <= rad; dy++) {
+            int py = sy + dy;
+            if (py < 0 || py >= g_pixel_h) continue;
+            for (int dx = -rad; dx <= rad; dx++) {
+                int px = sx + dx;
+                if (px < 0 || px >= g_pixel_w) continue;
+
+                float dist_sq = (dx * 1.0f) * (dx * 1.0f) + (dy * 1.8f) * (dy * 1.8f);
+                float max_r_sq = (float)(rad * rad);
+                if (dist_sq > max_r_sq) continue;
+
+                float density = (1.0f - dist_sq / max_r_sq) * alpha_fac;
+                if (density < 0.08f) continue;
+
+                if (sz > g_depth_buf[py][px] + 0.25f) continue;
+
+                RGB smk_col;
+                int c_level = (density > 0.65f) ? 2 : ((density > 0.35f) ? 1 : 0);
+                if (g_smoke[i].type == 0) smk_col = PALETTE_STEAM[c_level];
+                else if (g_smoke[i].type == 1) smk_col = PALETTE_SMOKE[c_level];
+                else smk_col = PALETTE_SOOT_PUFF[c_level];
+
+                static const int bayer2[2][2] = {
+                    {0, 2},
+                    {3, 1}
+                };
+                float dither_threshold = (bayer2[py & 1][px & 1] + 0.5f) / 4.0f;
+
+                if (density > dither_threshold || g_frame[py][px].is_sky) {
+                    if (g_frame[py][px].is_sky) {
+                        g_frame[py][px].color = smk_col;
+                        g_frame[py][px].is_sky = false;
+                    } else {
+                        float a = density * 0.65f;
+                        g_frame[py][px].color.r = (uint8_t)(g_frame[py][px].color.r * (1.0f - a) + smk_col.r * a);
+                        g_frame[py][px].color.g = (uint8_t)(g_frame[py][px].color.g * (1.0f - a) + smk_col.g * a);
+                        g_frame[py][px].color.b = (uint8_t)(g_frame[py][px].color.b * (1.0f - a) + smk_col.b * a);
+                    }
+                }
+            }
+        }
+    }
+
+    // 5. Rain Drops Streaks
+    if (g_rain_active) {
+        for (int i = 0; i < MAX_RAIN; i++) {
+            if (!g_rain[i].active) continue;
+            Vec3 p_rel = vec3_sub(g_rain[i].pos, cam_pos);
+            float rz = vec3_dot(p_rel, fwd);
+            if (rz < 0.5f) continue;
+
+            int sx = (int)(((vec3_dot(p_rel, right) / world_w) + 0.5f) * g_pixel_w);
+            int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
+            if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
+                if (rz < g_depth_buf[sy][sx] + 0.15f) {
+                    g_frame[sy][sx].color = COLOR_RAIN;
+                    g_frame[sy][sx].is_sky = false;
+                    if (sy - 1 >= 0 && rz < g_depth_buf[sy - 1][sx] + 0.15f) {
+                        g_frame[sy - 1][sx].color = COLOR_RAIN;
+                        g_frame[sy - 1][sx].is_sky = false;
+                    }
+                }
+            }
+        }
+    }
+
+    // 6. Ash Flakes Falling in 3D
     for (int i = 0; i < MAX_ASH_FLAKES; i++) {
         if (g_ash_flakes[i].active) {
             Vec3 p_rel = vec3_sub(g_ash_flakes[i].pos, cam_pos);
@@ -1991,7 +2523,7 @@ static void render_scene(void) {
         }
     }
 
-    // 6. Sparks Rising
+    // 7. Sparks Rising
     for (int i = 0; i < MAX_SPARKS; i++) {
         if (g_sparks[i].active) {
             Vec3 p_rel = vec3_sub(g_sparks[i].pos, cam_pos);
@@ -2027,7 +2559,6 @@ static void present_frame(void) {
             Pixel top = g_frame[y_top][x];
             Pixel bot = g_frame[y_bot][x];
 
-            // Case A: Both sky -> space with transparent background
             if (top.is_sky && bot.is_sky) {
                 if (!prev_bg_transp) {
                     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[49m");
@@ -2038,7 +2569,6 @@ static void present_frame(void) {
                 continue;
             }
 
-            // Case B: Top is sky, Bottom is color -> ▄ with transparent BG
             if (top.is_sky && !bot.is_sky) {
                 if (bot.color.r != prev_fg_r || bot.color.g != prev_fg_g || bot.color.b != prev_fg_b) {
                     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
@@ -2054,7 +2584,6 @@ static void present_frame(void) {
                 continue;
             }
 
-            // Case C: Top is color, Bottom is sky -> ▀ with transparent BG
             if (!top.is_sky && bot.is_sky) {
                 if (top.color.r != prev_fg_r || top.color.g != prev_fg_g || top.color.b != prev_fg_b) {
                     buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
@@ -2070,7 +2599,6 @@ static void present_frame(void) {
                 continue;
             }
 
-            // Case D: Both colors -> ▀ with FG and BG
             if (top.color.r != prev_fg_r || top.color.g != prev_fg_g || top.color.b != prev_fg_b) {
                 buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len, "\033[38;2;%d;%d;%dm",
                                     top.color.r, top.color.g, top.color.b);
@@ -2112,24 +2640,13 @@ static void present_frame(void) {
     if (g_stack_mode == 1) mode_name = "Tenda Cônica";
     else if (g_stack_mode == 2) mode_name = "Pirâmide";
 
-    int yaw_deg = (int)roundf(g_cam_yaw * 180.0f / (float)M_PI) % 360;
-    if (yaw_deg < 0) yaw_deg += 360;
-    int pitch_deg = (int)roundf(g_cam_pitch * 180.0f / (float)M_PI);
-
-    float avg_moisture = 0.0f;
-    float max_sag = 0.0f;
-    for (int i = 0; i < g_num_logs; i++) {
-        if (g_logs[i].sag_amount > max_sag) max_sag = g_logs[i].sag_amount;
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            avg_moisture += g_logs[i].segments[s].moisture;
-        }
-    }
-    avg_moisture = (avg_moisture / (float)(g_num_logs * NUM_LOG_SEGS)) * 100.0f;
+    const char *audio_str = g_audio_mute ? "\033[1;31m[MUTED]\033[0m" : "\033[1;32m[ON]\033[0m";
+    const char *weather_str = g_rain_active ? "\033[1;36mChuva 🌧\033[0m" : "\033[1;33mSeco ☀\033[0m";
 
     if (g_show_hud) {
         buf_len += snprintf(buf + buf_len, sizeof(buf) - buf_len,
-            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Umid: %.0f%% | Sag: %.2f | Cam: %d°/%d°%s | [f] Modo [+/-] Vel [m] Pilha [c] Colapsar [q] Sair ",
-            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name, avg_moisture, max_sag, yaw_deg, pitch_deg, g_auto_turntable ? " (AUTO)" : "");
+            "\033[1;33m[3D Bonfire]\033[0m %02d:%02d:%02d [%s %.1fx] | Pilha: \033[1;32m%s\033[0m | Fase: \033[1;37m%s\033[0m | Som: %s | Clima: %s | [F] Lenha [P] Chuva [M] Áudio [L] Pilha [+/-] Vel [C] Colapso [Q] Sair ",
+            hrs, mins, secs, g_realtime_mode ? "Realtime" : "Fast", g_time_scale, mode_name, stage_name, audio_str, weather_str);
     }
 
     if (buf_len > 0) {
@@ -2168,13 +2685,19 @@ static void handle_input(void) {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'f' || ch == 'F') {
+            stoke_fire_add_wood();
+        } else if (ch == 'p' || ch == 'P') {
+            g_rain_active = !g_rain_active;
+        } else if (ch == 'm' || ch == 'M') {
+            g_audio_mute = !g_audio_mute;
+        } else if (ch == 'l' || ch == 'L') {
+            g_stack_mode = (g_stack_mode + 1) % 3;
+            init_scene();
+        } else if (ch == 'x' || ch == 'X') {
             g_realtime_mode = !g_realtime_mode;
             g_time_scale = g_realtime_mode ? 1.0f : 30.0f;
         } else if (ch == 'i' || ch == 'I') {
             g_show_hud = !g_show_hud;
-        } else if (ch == 'm' || ch == 'M') {
-            g_stack_mode = (g_stack_mode + 1) % 3;
-            init_scene();
         } else if (ch == 't' || ch == 'T') {
             g_auto_turntable = !g_auto_turntable;
         } else if (ch == '0' || ch == 'z' || ch == 'Z') {
@@ -2223,6 +2746,7 @@ int main(int argc, char **argv) {
         float target_sim = (argc > 3) ? atof(argv[3]) : 0.0f;
         if (argc > 4) g_cam_yaw = atof(argv[4]) * (float)M_PI / 180.0f;
         if (argc > 5) g_cam_pitch = atof(argv[5]) * (float)M_PI / 180.0f;
+        if (argc > 7 && strcmp(argv[7], "rain") == 0) g_rain_active = true;
         g_time_scale = 30.0f; // Fast advance for headless snapshot rendering
         while (g_sim_time < target_sim) {
             update_simulation();
@@ -2246,6 +2770,7 @@ int main(int argc, char **argv) {
     setup_terminal();
     update_dimensions();
     init_scene();
+    start_audio_engine();
 
     struct timespec ts;
     while (g_running) {
@@ -2265,5 +2790,6 @@ int main(int argc, char **argv) {
         nanosleep(&ts, NULL);
     }
 
+    stop_audio_engine();
     return 0;
 }
