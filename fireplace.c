@@ -216,6 +216,13 @@ typedef struct {
     float break_t;                     // Fracture split ratio along the log [0.25..0.75]
     Vec3 break_p1, break_p1_orig, break_p1_target; // Piece 1 broken tip
     Vec3 break_p2, break_p2_orig, break_p2_target; // Piece 2 broken tip
+    bool is_falling;                   // Dynamic ragdoll drop state
+    Vec3 rest_p1, rest_p2;             // Target settled resting endpoints
+    float fall_vy;                     // Vertical velocity (gravity/bounce)
+    float fall_rot_y;                  // Rotational tumble angle
+    float fall_rot_vy;                 // Angular velocity
+    int fall_bounces;                  // Count of impact bounces
+    float fall_timer;                  // Fall duration
 } Cylinder3D;
 
 typedef struct {
@@ -461,6 +468,14 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
     c->fractured = false;
     c->fracture_prog = 0.0f;
     c->break_t = 0.5f;
+    c->is_falling = false;
+    c->rest_p1 = p1;
+    c->rest_p2 = p2;
+    c->fall_vy = 0.0f;
+    c->fall_rot_y = 0.0f;
+    c->fall_rot_vy = 0.0f;
+    c->fall_bounces = 0;
+    c->fall_timer = 0.0f;
     Vec3 mid = vec3_scale(vec3_add(p1, p2), 0.5f);
     c->break_p1 = mid;
     c->break_p1_orig = mid;
@@ -1067,10 +1082,52 @@ static void spawn_smoke_3d(Vec3 pos, Vec3 vel, float size, float life, int type)
     }
 }
 
-static void stoke_fire_add_wood(void) {
-    g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.40f);
+static bool stoke_fire_add_wood(void) {
+    // 1. Cannot throw a new log while another is still falling in the air
+    for (int i = 0; i < g_num_logs; i++) {
+        if (g_logs[i].is_falling) return false;
+    }
 
-    // Revive kindling
+    // 2. Assess current fire intensity and active unburnt wood capacity
+    float fire_heat = g_ash_bed.heat;
+    int unburnt_logs = 0;
+    for (int i = 0; i < g_num_logs; i++) {
+        float mass = g_logs[i].segments[4].structural_mass;
+        float burn = g_logs[i].segments[4].burn_progress;
+        if (mass > 0.35f && burn < 0.65f) {
+            unburnt_logs++;
+        }
+        for (int s = 0; s < NUM_LOG_SEGS; s++) {
+            if (g_logs[i].segments[s].temp > 0.25f) {
+                fire_heat = fmaxf(fire_heat, g_logs[i].segments[s].temp);
+            }
+        }
+    }
+
+    // Dynamic capacity: roaring fire can take 7 logs, moderate fire 5-6, dying fire 4
+    int max_capacity = 4;
+    if (fire_heat > 0.60f) max_capacity = 7;
+    else if (fire_heat > 0.30f) max_capacity = 6;
+    else if (fire_heat > 0.15f) max_capacity = 5;
+
+    // If completely dead cold, cannot catch new log
+    if (fire_heat < 0.08f && g_sim_time > 100.0f) {
+        return false;
+    }
+
+    if (unburnt_logs >= max_capacity) {
+        // Fire is full! Just gently stoke the existing ember bed without adding more wood
+        g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.15f);
+        Vec3 hearth_c = (Vec3){0.0f, -3.5f, 0.0f};
+        for (int sp = 0; sp < 15; sp++) {
+            Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.0f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 2.0f};
+            spawn_spark_3d(hearth_c, sp_v, rand_range(15, 35), PALETTE_EMBERS[rand_range(2, 4)]);
+        }
+        return false;
+    }
+
+    // Revive kindling/embers if low
+    g_ash_bed.heat = fminf(1.0f, g_ash_bed.heat + 0.30f);
     for (int i = 0; i < g_num_twigs; i++) {
         if (!g_twigs[i].active || g_twigs[i].burn_progress > 0.85f) {
             g_twigs[i].active = true;
@@ -1079,65 +1136,81 @@ static void stoke_fire_add_wood(void) {
             g_twigs[i].temp = 0.45f;
         }
     }
-    for (int l = 0; l < g_num_leaves; l++) {
-        if (!g_leaves[l].active || g_leaves[l].burn_progress > 0.85f) {
-            g_leaves[l].active = true;
-            g_leaves[l].burn_progress = 0.0f;
-            g_leaves[l].temp = 0.55f;
-        }
-    }
 
-    // Add fresh log into new slot or replace fully consumed log
+    // 3. Find the best slot for the new log
     int target_slot = -1;
     if (g_num_logs < MAX_LOGS) {
         target_slot = g_num_logs;
         g_num_logs++;
     } else {
-        // Find truly consumed log
         float min_mass = 999.0f;
         int min_idx = -1;
         for (int i = 0; i < g_num_logs; i++) {
             float m = 0.0f;
-            bool all_burnt = true;
-            for (int s = 0; s < NUM_LOG_SEGS; s++) {
-                m += g_logs[i].segments[s].structural_mass;
-                if (g_logs[i].segments[s].burn_progress < 0.90f) all_burnt = false;
-            }
-            if (all_burnt && m < 0.10f && m < min_mass) {
+            for (int s = 0; s < NUM_LOG_SEGS; s++) m += g_logs[i].segments[s].structural_mass;
+            if (m < min_mass) {
                 min_mass = m;
                 min_idx = i;
             }
         }
-        if (min_idx >= 0) {
-            target_slot = min_idx;
+        if (min_idx >= 0) target_slot = min_idx;
+    }
+
+    if (target_slot < 0) return false;
+
+    // 4. Calculate non-overlapping Teepee angle (furthest angular gap from standing logs)
+    float best_angle = rand_f() * 6.2831853f;
+    float max_min_dist = -1.0f;
+    for (int cand = 0; cand < 16; cand++) {
+        float test_angle = cand * (6.2831853f / 16.0f) + (rand_f() - 0.5f) * 0.15f;
+        float min_d = 999.0f;
+        for (int i = 0; i < g_num_logs; i++) {
+            if (i == target_slot) continue;
+            if (g_logs[i].segments[4].structural_mass < 0.20f) continue;
+            float log_ang = atan2f(g_logs[i].p1_orig.z, g_logs[i].p1_orig.x);
+            float diff = fabsf(test_angle - log_ang);
+            if (diff > (float)M_PI) diff = 2.0f * (float)M_PI - diff;
+            if (diff < min_d) min_d = diff;
+        }
+        if (min_d > max_min_dist) {
+            max_min_dist = min_d;
+            best_angle = test_angle;
         }
     }
 
-    if (target_slot >= 0) {
-        float angle = rand_f() * (float)M_PI;
-        float span = 4.4f + rand_f() * 0.6f;
-        float radius = 0.95f + rand_f() * 0.25f;
-        float ground_y = -4.2f;
+    float ground_y = -4.2f;
+    float radius = 0.95f + rand_f() * 0.22f;
+    float contact_r = 4.25f + 0.20f * (rand_f() - 0.5f);
+    float apex_r = 0.65f + 0.10f * (rand_f() - 0.5f);
+    float apex_y = 2.30f + 0.20f * (rand_f() - 0.5f);
 
-        Vec3 p1 = (Vec3){ cosf(angle) * span, -2.0f + (rand_f() - 0.5f) * 0.4f, sinf(angle) * span };
-        Vec3 p2 = (Vec3){ -cosf(angle) * span, -1.8f + (rand_f() - 0.5f) * 0.4f, -sinf(angle) * span };
-        Vec3 p1_col = (Vec3){ cosf(angle) * (span * 0.92f), ground_y + radius + 0.30f, sinf(angle) * (span * 0.92f) };
-        Vec3 p2_col = (Vec3){ -cosf(angle) * (span * 0.92f), ground_y + radius + 0.30f, -sinf(angle) * (span * 0.92f) };
+    Vec3 rest_p1 = (Vec3){ contact_r * cosf(best_angle), ground_y - 0.40f, contact_r * sinf(best_angle) };
+    Vec3 rest_p2 = (Vec3){ apex_r * cosf(best_angle), apex_y, apex_r * sinf(best_angle) };
+    Vec3 p2_coll = (Vec3){ apex_r * 0.35f * cosf(best_angle), ground_y + radius * 0.70f, apex_r * 0.35f * sinf(best_angle) };
 
-        init_cylinder(&g_logs[target_slot], 100 + target_slot, p1, p2, p1_col, p2_col, radius, 0.0f);
-        g_logs[target_slot].support_log1 = -1;
-        g_logs[target_slot].support_log2 = -1;
-        for (int s = 0; s < NUM_LOG_SEGS; s++) {
-            g_logs[target_slot].segments[s].moisture = 0.12f;
-            g_logs[target_slot].segments[s].temp = 0.30f;
-        }
+    // Initial Ragdoll Drop Position high above the hearth
+    float spawn_drop_h = 7.2f + rand_f() * 1.5f;
+    Vec3 spawn_p1 = (Vec3){ rest_p1.x + (rand_f() - 0.5f) * 0.8f, rest_p1.y + spawn_drop_h, rest_p1.z + (rand_f() - 0.5f) * 0.8f };
+    Vec3 spawn_p2 = (Vec3){ rest_p2.x + (rand_f() - 0.5f) * 0.8f, rest_p2.y + spawn_drop_h + 1.2f, rest_p2.z + (rand_f() - 0.5f) * 0.8f };
+
+    init_cylinder(&g_logs[target_slot], 100 + target_slot, spawn_p1, spawn_p2, rest_p1, p2_coll, radius, 0.0f);
+    g_logs[target_slot].p1_orig = rest_p1;
+    g_logs[target_slot].p2_orig = rest_p2;
+    g_logs[target_slot].rest_p1 = rest_p1;
+    g_logs[target_slot].rest_p2 = rest_p2;
+    g_logs[target_slot].is_falling = true;
+    g_logs[target_slot].fall_vy = -3.8f;
+    g_logs[target_slot].fall_rot_y = (rand_f() - 0.5f) * 0.5f;
+    g_logs[target_slot].fall_rot_vy = (rand_f() - 0.5f) * 2.5f;
+    g_logs[target_slot].fall_bounces = 0;
+    g_logs[target_slot].fall_timer = 0.0f;
+
+    for (int s = 0; s < NUM_LOG_SEGS; s++) {
+        g_logs[target_slot].segments[s].moisture = 0.16f;
+        g_logs[target_slot].segments[s].temp = 0.05f;
     }
 
-    Vec3 hearth_c = (Vec3){0.0f, -3.5f, 0.0f};
-    for (int sp = 0; sp < 36; sp++) {
-        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 3.2f, rand_f() * 4.5f + 2.5f, (rand_f() - 0.5f) * 3.2f};
-        spawn_spark_3d(hearth_c, sp_v, rand_range(25, 55), PALETTE_EMBERS[rand_range(2, 4)]);
-    }
+    return true;
 }
 
 static void update_simulation(void) {
@@ -1552,14 +1625,68 @@ static void update_simulation(void) {
                 }
             }
 
-            float c = g_logs[i].collapse_cur;
-            g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
-            g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
-            g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+            if (g_logs[i].is_falling) {
+                g_logs[i].fall_timer += step_dt;
 
-            g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
-            g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
-            g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
+                // Gravity acceleration (downward)
+                g_logs[i].fall_vy -= 26.0f * step_dt;
+                float dy = g_logs[i].fall_vy * step_dt;
+
+                // Tumble rotation
+                g_logs[i].fall_rot_y += g_logs[i].fall_rot_vy * step_dt;
+                g_logs[i].fall_rot_vy *= 0.97f; // rotational air resistance
+
+                g_logs[i].p1.y += dy;
+                g_logs[i].p2.y += dy;
+
+                // Dynamic tilt jitter
+                float rot_offset_x = sinf(g_logs[i].fall_rot_y) * 0.35f;
+                float rot_offset_z = cosf(g_logs[i].fall_rot_y) * 0.35f;
+
+                g_logs[i].p2.x = g_logs[i].rest_p2.x + rot_offset_x;
+                g_logs[i].p2.z = g_logs[i].rest_p2.z + rot_offset_z;
+
+                // Check impact threshold against rest position
+                if (g_logs[i].p1.y <= g_logs[i].rest_p1.y) {
+                    g_logs[i].fall_bounces++;
+
+                    // Impact spark burst and soot puff
+                    Vec3 impact_pt = vec3_scale(vec3_add(g_logs[i].p1, g_logs[i].p2), 0.5f);
+                    for (int sp = 0; sp < 22; sp++) {
+                        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 3.6f, rand_f() * 4.2f + 2.0f, (rand_f() - 0.5f) * 3.6f};
+                        spawn_spark_3d(impact_pt, sp_v, rand_range(20, 50), PALETTE_EMBERS[rand_range(2, 4)]);
+                    }
+                    for (int sk = 0; sk < 4; sk++) {
+                        Vec3 smk_v = (Vec3){(rand_f() - 0.5f) * 1.5f, rand_f() * 1.8f + 0.8f, (rand_f() - 0.5f) * 1.5f};
+                        spawn_smoke_3d(impact_pt, smk_v, 0.45f, 2.5f, 2);
+                    }
+
+                    if (g_logs[i].fall_bounces >= 2 || fabsf(g_logs[i].fall_vy) < 2.5f || g_logs[i].fall_timer > 0.65f) {
+                        // Settle and lock in resting pose
+                        g_logs[i].p1 = g_logs[i].rest_p1;
+                        g_logs[i].p2 = g_logs[i].rest_p2;
+                        g_logs[i].p1_orig = g_logs[i].rest_p1;
+                        g_logs[i].p2_orig = g_logs[i].rest_p2;
+                        g_logs[i].is_falling = false;
+                        g_logs[i].fall_vy = 0.0f;
+                    } else {
+                        // Inelastic bounce
+                        g_logs[i].p1.y = g_logs[i].rest_p1.y + 0.08f;
+                        g_logs[i].p2.y = g_logs[i].rest_p2.y + 0.18f;
+                        g_logs[i].fall_vy = -g_logs[i].fall_vy * 0.28f;
+                        g_logs[i].fall_rot_vy = (rand_f() - 0.5f) * 3.0f;
+                    }
+                }
+            } else {
+                float c = g_logs[i].collapse_cur;
+                g_logs[i].p1.x = g_logs[i].p1_orig.x * (1.0f - c) + g_logs[i].p1_collapsed.x * c;
+                g_logs[i].p1.y = g_logs[i].p1_orig.y * (1.0f - c) + g_logs[i].p1_collapsed.y * c;
+                g_logs[i].p1.z = g_logs[i].p1_orig.z * (1.0f - c) + g_logs[i].p1_collapsed.z * c;
+
+                g_logs[i].p2.x = g_logs[i].p2_orig.x * (1.0f - c) + g_logs[i].p2_collapsed.x * c;
+                g_logs[i].p2.y = g_logs[i].p2_orig.y * (1.0f - c) + g_logs[i].p2_collapsed.y * c;
+                g_logs[i].p2.z = g_logs[i].p2_orig.z * (1.0f - c) + g_logs[i].p2_collapsed.z * c;
+            }
 
             if (g_logs[i].fractured) {
                 if (g_logs[i].fracture_prog < 1.0f) {
