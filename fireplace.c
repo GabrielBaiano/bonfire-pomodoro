@@ -1031,28 +1031,22 @@ static void build_dark_souls_scene(void) {
     }
 
     // 4. Detailed Bone Pile embedded in and resting prominently on Ash Mound
-    // Skull 0: Giant Prominent Humanoid Skull in the foreground, propped high facing camera
-    init_skull(&g_bones[0], OBJ_BONE_BASE + 0, (Vec3){ -0.75f, -2.32f, -2.15f }, 1.15f, 0.12f, -0.04f, 0.12f, 0.20f);
-
-    // Skull 1: Front-right slope skull nestled beside the charred branch
-    init_skull(&g_bones[1], OBJ_BONE_BASE + 1, (Vec3){ 1.35f, -2.48f, -1.65f }, 0.82f, -0.28f, -0.08f, 0.20f, 0.35f);
-
-    // Skull 2: Central Skull nestled in the embers right at the sword entry
-    init_skull(&g_bones[2], OBJ_BONE_BASE + 2, (Vec3){ 0.40f, -2.48f, -0.95f }, 0.72f, -0.08f, 0.04f, 0.35f, 0.60f);
-
-    // Skull 3: Rear-left skull perched high on the ash mound
-    init_skull(&g_bones[3], OBJ_BONE_BASE + 3, (Vec3){ -0.85f, -2.35f, 0.95f }, 0.60f, 2.75f, 0.10f, 0.45f, 0.40f);
-
-    // Skull 4: Rear-right skull
-    init_skull(&g_bones[4], OBJ_BONE_BASE + 4, (Vec3){ 0.95f, -2.35f, 0.90f }, 0.58f, -2.60f, 0.10f, 0.40f, 0.40f);
+    // The single iconic Dark Souls human skull, scaled proportionally and resting on the bone pyre
+    init_skull(&g_bones[0], OBJ_BONE_BASE + 0, (Vec3){ -0.65f, -2.48f, -1.95f }, 0.82f, 0.12f, -0.04f, 0.12f, 0.20f);
 
     // Criss-crossing femurs, ribs, and limb bones forming a massive dense bone pyre
     struct { Vec3 p1, p2; float r_s, r_j, chr, ht; } bone_specs[] = {
-        // Crossed large femurs cradling the giant foreground skull 0 from underneath
-        { {-2.25f, -3.35f, -2.10f}, {-0.15f, -3.15f, -1.65f}, 0.22f, 0.38f, 0.15f, 0.18f },
-        { {-0.25f, -3.15f, -2.10f}, {-2.15f, -3.40f, -1.55f}, 0.22f, 0.38f, 0.15f, 0.18f },
+        // Crossed large femurs cradling the foreground skull from underneath
+        { {-2.15f, -3.35f, -1.90f}, {-0.10f, -3.15f, -1.55f}, 0.22f, 0.36f, 0.15f, 0.18f },
+        { {-0.15f, -3.15f, -1.90f}, {-2.05f, -3.40f, -1.45f}, 0.22f, 0.36f, 0.15f, 0.18f },
 
-        // Crossed femurs cradling skull 1 on the right slope
+        // Dense limb bones across mound flanks and summit (replacing former extra skulls)
+        { { 1.35f, -2.65f, -1.45f}, { 2.25f, -3.35f, -0.95f}, 0.21f, 0.34f, 0.20f, 0.25f },
+        { { 0.35f, -2.55f, -0.95f}, { 1.15f, -2.85f, -0.45f}, 0.20f, 0.32f, 0.40f, 0.60f },
+        { {-0.75f, -2.45f,  0.85f}, {-1.55f, -3.15f,  1.25f}, 0.20f, 0.32f, 0.45f, 0.40f },
+        { { 0.85f, -2.45f,  0.80f}, { 1.65f, -3.15f,  1.20f}, 0.20f, 0.32f, 0.40f, 0.40f },
+
+        // Crossed femurs on the right slope
         { { 2.35f, -3.35f, -1.75f}, { 0.65f, -3.15f, -1.25f}, 0.22f, 0.38f, 0.18f, 0.22f },
         { { 0.75f, -3.15f, -1.80f}, { 2.45f, -3.40f, -1.15f}, 0.22f, 0.38f, 0.18f, 0.22f },
 
@@ -1112,11 +1106,11 @@ static void build_dark_souls_scene(void) {
         { { 0.45f, -3.35f,  0.45f}, { 1.15f, -3.65f,  1.05f}, 0.19f, 0.30f, 0.20f, 0.20f }
     };
     int num_specs = (int)(sizeof(bone_specs) / sizeof(bone_specs[0]));
-    g_num_bones = 5 + num_specs;
+    g_num_bones = 1 + num_specs;
     if (g_num_bones > MAX_BONES) g_num_bones = MAX_BONES;
 
-    for (int i = 0; i < num_specs && (5 + i) < MAX_BONES; i++) {
-        init_bone(&g_bones[5 + i], OBJ_BONE_BASE + 5 + i,
+    for (int i = 0; i < num_specs && (1 + i) < MAX_BONES; i++) {
+        init_bone(&g_bones[1 + i], OBJ_BONE_BASE + 1 + i,
                   bone_specs[i].p1, bone_specs[i].p2,
                   bone_specs[i].r_s, bone_specs[i].r_j,
                   bone_specs[i].chr, bone_specs[i].ht);
@@ -3480,8 +3474,8 @@ static void render_scene(void) {
                     int nid = g_id_buf[ny][nx];
                     if (nid != curr_id) {
                         if (curr_id >= OBJ_BONE_BASE && nid >= OBJ_BONE_BASE) {
-                            // Clear silhouettes for humanoid skulls and prominent limb bones
-                            float thresh = (curr_id < OBJ_BONE_BASE + 5 || nid < OBJ_BONE_BASE + 5) ? 0.18f : 0.38f;
+                            // Clear silhouette for the single foreground humanoid skull
+                            float thresh = (curr_id == OBJ_BONE_BASE || nid == OBJ_BONE_BASE) ? 0.18f : 0.38f;
                             if (fabsf(g_depth_buf[y][x] - g_depth_buf[ny][nx]) > thresh) {
                                 is_edge = true;
                                 break;
