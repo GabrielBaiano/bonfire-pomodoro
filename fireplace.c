@@ -207,7 +207,7 @@ typedef struct {
 
 #define NUM_SWORD_BLADE_SEGS 26
 #define OBJ_SWORD 800
-#define MAX_BONES 48
+#define MAX_BONES 80
 #define OBJ_BONE_BASE 900
 
 typedef struct {
@@ -939,9 +939,9 @@ static void init_skull(Bone3D *b, int id, Vec3 pos, float radius, float yaw, flo
     b->eye_right = vec3_add(pos, vec3_add(vec3_scale(fwd, eye_forward),
                                   vec3_add(vec3_scale(right, eye_spacing), vec3_scale(up, eye_up))));
 
-    // Maxilla and jaw positioned slightly forward and lower
-    b->jaw_pos = vec3_add(pos, vec3_add(vec3_scale(fwd, radius * 0.32f), vec3_scale(up, -radius * 0.45f)));
-    b->jaw_radius = radius * 0.58f;
+    // Maxilla and jaw positioned forward and lower (proportional anatomically)
+    b->jaw_pos = vec3_add(pos, vec3_add(vec3_scale(fwd, radius * 0.22f), vec3_scale(up, -radius * 0.44f)));
+    b->jaw_radius = radius * 0.36f;
 }
 
 static void build_dark_souls_scene(void) {
@@ -1031,34 +1031,36 @@ static void build_dark_souls_scene(void) {
     }
 
     // 4. Detailed Bone Pile embedded in and resting prominently on Ash Mound
-    g_num_bones = 32;
+    // Skull 0: Giant Prominent Humanoid Skull in the foreground, propped high facing camera
+    init_skull(&g_bones[0], OBJ_BONE_BASE + 0, (Vec3){ -0.75f, -2.32f, -2.15f }, 1.15f, 0.12f, -0.04f, 0.12f, 0.20f);
 
-    // Skull 0: Prominent Humanoid Skull in the foreground-left, tilted slightly forward towards camera
-    init_skull(&g_bones[0], OBJ_BONE_BASE + 0, (Vec3){ -1.20f, -2.42f, -1.65f }, 0.68f, 0.08f, -0.08f, 0.15f, 0.25f);
+    // Skull 1: Front-right slope skull nestled beside the charred branch
+    init_skull(&g_bones[1], OBJ_BONE_BASE + 1, (Vec3){ 1.35f, -2.48f, -1.65f }, 0.82f, -0.28f, -0.08f, 0.20f, 0.35f);
 
-    // Skull 1: Central Skull nestled in the embers right at the sword entry
-    init_skull(&g_bones[1], OBJ_BONE_BASE + 1, (Vec3){ 0.35f, -2.44f, -1.05f }, 0.58f, -0.12f, 0.04f, 0.45f, 0.65f);
-
-    // Skull 2: Skull on the front-right slope of the ash mound near the charred branch
-    init_skull(&g_bones[2], OBJ_BONE_BASE + 2, (Vec3){ 1.55f, -2.52f, -1.25f }, 0.55f, -0.30f, -0.08f, 0.22f, 0.30f);
+    // Skull 2: Central Skull nestled in the embers right at the sword entry
+    init_skull(&g_bones[2], OBJ_BONE_BASE + 2, (Vec3){ 0.40f, -2.48f, -0.95f }, 0.72f, -0.08f, 0.04f, 0.35f, 0.60f);
 
     // Skull 3: Rear-left skull perched high on the ash mound
-    init_skull(&g_bones[3], OBJ_BONE_BASE + 3, (Vec3){ -0.75f, -2.32f, 0.95f }, 0.48f, 2.75f, 0.10f, 0.50f, 0.45f);
+    init_skull(&g_bones[3], OBJ_BONE_BASE + 3, (Vec3){ -0.85f, -2.35f, 0.95f }, 0.60f, 2.75f, 0.10f, 0.45f, 0.40f);
 
-    // Criss-crossing femurs, ribs, and limb bones forming the dense bonfire pile
-    struct { Vec3 p1, p2; float r_s, r_j, chr, ht; } bone_specs[28] = {
-        // Crossed femurs cradling skull 0 in the foreground
-        { {-1.95f, -2.85f, -1.85f}, {-0.55f, -2.45f, -1.35f}, 0.24f, 0.40f, 0.15f, 0.20f },
-        { {-0.75f, -2.35f, -1.95f}, {-1.85f, -2.90f, -1.25f}, 0.24f, 0.40f, 0.15f, 0.20f },
+    // Skull 4: Rear-right skull
+    init_skull(&g_bones[4], OBJ_BONE_BASE + 4, (Vec3){ 0.95f, -2.35f, 0.90f }, 0.58f, -2.60f, 0.10f, 0.40f, 0.40f);
 
-        // Crossed femurs cradling skull 2 on the right slope
-        { { 1.95f, -2.85f, -1.45f}, { 0.85f, -2.45f, -0.95f}, 0.24f, 0.40f, 0.20f, 0.25f },
-        { { 1.15f, -2.35f, -1.55f}, { 2.10f, -2.90f, -0.85f}, 0.24f, 0.40f, 0.20f, 0.25f },
+    // Criss-crossing femurs, ribs, and limb bones forming a massive dense bone pyre
+    struct { Vec3 p1, p2; float r_s, r_j, chr, ht; } bone_specs[] = {
+        // Crossed large femurs cradling the giant foreground skull 0 from underneath
+        { {-2.25f, -3.35f, -2.10f}, {-0.15f, -3.15f, -1.65f}, 0.22f, 0.38f, 0.15f, 0.18f },
+        { {-0.25f, -3.15f, -2.10f}, {-2.15f, -3.40f, -1.55f}, 0.22f, 0.38f, 0.15f, 0.18f },
 
-        // Ribs arching out of the ash bed around the sword base
-        { {-0.65f, -2.25f, -0.55f}, { 0.65f, -2.25f, -0.60f}, 0.20f, 0.32f, 0.60f, 0.85f },
-        { {-0.85f, -2.28f, -0.25f}, { 0.85f, -2.28f, -0.20f}, 0.20f, 0.32f, 0.65f, 0.85f },
-        { {-0.70f, -2.25f,  0.35f}, { 0.70f, -2.25f,  0.40f}, 0.20f, 0.32f, 0.70f, 0.85f },
+        // Crossed femurs cradling skull 1 on the right slope
+        { { 2.35f, -3.35f, -1.75f}, { 0.65f, -3.15f, -1.25f}, 0.22f, 0.38f, 0.18f, 0.22f },
+        { { 0.75f, -3.15f, -1.80f}, { 2.45f, -3.40f, -1.15f}, 0.22f, 0.38f, 0.18f, 0.22f },
+
+        // Curved ribcage arches wrapping out of the ash bed around the sword base
+        { {-1.05f, -2.15f, -0.65f}, { 1.05f, -2.15f, -0.70f}, 0.20f, 0.32f, 0.60f, 0.85f },
+        { {-1.15f, -2.18f, -0.25f}, { 1.15f, -2.18f, -0.20f}, 0.20f, 0.32f, 0.65f, 0.85f },
+        { {-1.05f, -2.15f,  0.35f}, { 1.05f, -2.15f,  0.40f}, 0.20f, 0.32f, 0.70f, 0.85f },
+        { {-0.90f, -2.25f,  0.75f}, { 0.90f, -2.25f,  0.80f}, 0.20f, 0.32f, 0.55f, 0.75f },
 
         // Outer radiating long bones down the front mound slope
         { {-0.45f, -2.40f, -1.25f}, {-1.75f, -3.45f, -2.35f}, 0.22f, 0.36f, 0.18f, 0.18f },
@@ -1066,10 +1068,19 @@ static void build_dark_souls_scene(void) {
         { {-0.30f, -2.55f, -1.60f}, { 0.35f, -2.80f, -2.10f}, 0.21f, 0.34f, 0.15f, 0.15f },
         { {-1.45f, -3.25f, -1.85f}, {-0.25f, -3.60f, -2.55f}, 0.20f, 0.32f, 0.15f, 0.15f },
         { { 0.25f, -3.60f, -2.55f}, { 1.45f, -3.25f, -1.85f}, 0.20f, 0.32f, 0.15f, 0.15f },
-        { { 2.10f, -3.35f, -0.45f}, { 2.95f, -3.80f,  0.35f}, 0.20f, 0.32f, 0.20f, 0.20f },
-        { {-2.10f, -3.35f, -0.45f}, {-2.95f, -3.80f,  0.35f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { {-0.85f, -3.35f, -2.20f}, {-1.85f, -3.65f, -2.80f}, 0.20f, 0.32f, 0.14f, 0.14f },
+        { { 0.85f, -3.35f, -2.20f}, { 1.85f, -3.65f, -2.80f}, 0.20f, 0.32f, 0.14f, 0.14f },
+        { {-0.20f, -2.85f, -2.05f}, { 0.15f, -3.45f, -2.75f}, 0.21f, 0.34f, 0.15f, 0.15f },
 
-        // Rear slope and summit bones
+        // Lateral and flank mound collar bones
+        { { 2.10f, -3.35f, -0.45f}, { 3.15f, -3.85f,  0.35f}, 0.21f, 0.34f, 0.20f, 0.20f },
+        { {-2.10f, -3.35f, -0.45f}, {-3.15f, -3.85f,  0.35f}, 0.21f, 0.34f, 0.20f, 0.20f },
+        { { 2.50f, -3.45f, -1.15f}, { 3.35f, -3.90f, -0.35f}, 0.20f, 0.32f, 0.18f, 0.18f },
+        { {-2.50f, -3.45f, -1.15f}, {-3.35f, -3.90f, -0.35f}, 0.20f, 0.32f, 0.18f, 0.18f },
+        { { 1.85f, -2.75f,  0.15f}, { 2.85f, -3.55f,  0.95f}, 0.21f, 0.34f, 0.25f, 0.25f },
+        { {-1.85f, -2.75f,  0.15f}, {-2.85f, -3.55f,  0.95f}, 0.21f, 0.34f, 0.25f, 0.25f },
+
+        // Rear slope and summit long bones
         { {-1.25f, -2.35f,  0.75f}, { 0.15f, -2.15f,  1.10f}, 0.22f, 0.36f, 0.35f, 0.45f },
         { { 1.25f, -2.35f,  0.65f}, {-0.15f, -2.15f,  1.05f}, 0.22f, 0.36f, 0.35f, 0.45f },
         { {-0.35f, -2.30f,  0.85f}, {-1.85f, -3.35f,  1.55f}, 0.21f, 0.34f, 0.30f, 0.30f },
@@ -1077,17 +1088,35 @@ static void build_dark_souls_scene(void) {
         { {-1.65f, -3.45f,  1.15f}, {-2.45f, -3.80f,  1.95f}, 0.19f, 0.30f, 0.20f, 0.20f },
         { { 1.65f, -3.45f,  1.15f}, { 2.45f, -3.80f,  1.95f}, 0.19f, 0.30f, 0.20f, 0.20f },
         { {-0.65f, -3.65f,  2.15f}, { 0.65f, -3.65f,  2.25f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { {-1.35f, -3.20f,  1.85f}, {-0.25f, -3.75f,  2.65f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { { 1.35f, -3.20f,  1.85f}, { 0.25f, -3.75f,  2.65f}, 0.19f, 0.30f, 0.20f, 0.20f },
         { {-2.25f, -3.65f, -0.65f}, {-2.85f, -3.82f,  0.55f}, 0.19f, 0.30f, 0.18f, 0.18f },
         { { 2.25f, -3.65f, -0.65f}, { 2.85f, -3.82f,  0.55f}, 0.19f, 0.30f, 0.18f, 0.18f },
         { {-0.95f, -3.05f, -1.45f}, { 0.05f, -3.15f, -1.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
         { { 0.95f, -3.05f, -1.35f}, {-0.05f, -3.15f, -1.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
         { {-0.55f, -2.65f, -0.95f}, { 0.55f, -2.65f, -0.90f}, 0.21f, 0.34f, 0.35f, 0.40f },
         { {-1.15f, -2.75f,  0.45f}, {-0.25f, -3.05f,  0.85f}, 0.20f, 0.32f, 0.25f, 0.25f },
-        { { 1.15f, -2.75f,  0.45f}, { 0.25f, -3.05f,  0.85f}, 0.20f, 0.32f, 0.25f, 0.25f }
+        { { 1.15f, -2.75f,  0.45f}, { 0.25f, -3.05f,  0.85f}, 0.20f, 0.32f, 0.25f, 0.25f },
+        { {-0.65f, -2.85f,  1.25f}, { 0.65f, -2.85f,  1.30f}, 0.20f, 0.32f, 0.25f, 0.25f },
+        { {-1.85f, -3.05f,  0.65f}, {-0.95f, -2.45f,  0.15f}, 0.20f, 0.32f, 0.25f, 0.25f },
+        { { 1.85f, -3.05f,  0.65f}, { 0.95f, -2.45f,  0.15f}, 0.20f, 0.32f, 0.25f, 0.25f },
+        { {-2.65f, -3.75f, -0.15f}, {-1.85f, -3.35f, -0.95f}, 0.19f, 0.30f, 0.18f, 0.18f },
+        { { 2.65f, -3.75f, -0.15f}, { 1.85f, -3.35f, -0.95f}, 0.19f, 0.30f, 0.18f, 0.18f },
+        { {-1.15f, -3.45f, -1.45f}, {-2.15f, -3.85f, -1.05f}, 0.19f, 0.30f, 0.16f, 0.16f },
+        { { 1.15f, -3.45f, -1.45f}, { 2.15f, -3.85f, -1.05f}, 0.19f, 0.30f, 0.16f, 0.16f },
+        { {-0.15f, -2.45f, -0.75f}, {-0.45f, -2.95f, -1.25f}, 0.21f, 0.34f, 0.30f, 0.40f },
+        { { 0.15f, -2.45f, -0.75f}, { 0.45f, -2.95f, -1.25f}, 0.21f, 0.34f, 0.30f, 0.40f },
+        { {-0.85f, -3.15f, -0.35f}, {-1.45f, -3.55f, -0.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { { 0.85f, -3.15f, -0.35f}, { 1.45f, -3.55f, -0.85f}, 0.20f, 0.32f, 0.20f, 0.20f },
+        { {-0.45f, -3.35f,  0.45f}, {-1.15f, -3.65f,  1.05f}, 0.19f, 0.30f, 0.20f, 0.20f },
+        { { 0.45f, -3.35f,  0.45f}, { 1.15f, -3.65f,  1.05f}, 0.19f, 0.30f, 0.20f, 0.20f }
     };
+    int num_specs = (int)(sizeof(bone_specs) / sizeof(bone_specs[0]));
+    g_num_bones = 5 + num_specs;
+    if (g_num_bones > MAX_BONES) g_num_bones = MAX_BONES;
 
-    for (int i = 0; i < 28; i++) {
-        init_bone(&g_bones[4 + i], OBJ_BONE_BASE + 4 + i,
+    for (int i = 0; i < num_specs && (5 + i) < MAX_BONES; i++) {
+        init_bone(&g_bones[5 + i], OBJ_BONE_BASE + 5 + i,
                   bone_specs[i].p1, bone_specs[i].p2,
                   bone_specs[i].r_s, bone_specs[i].r_j,
                   bone_specs[i].chr, bone_specs[i].ht);
@@ -1236,30 +1265,40 @@ static bool intersect_bone(const Bone3D *b, Vec3 ro, Vec3 rd, float *out_t, Vec3
         if (hit && b->skull_radius > 0.01f) {
             Vec3 delta = vec3_sub(best_pt, b->skull_pos);
             float pfwd = vec3_dot(delta, b->dir);
-            if (pfwd > b->skull_radius * 0.30f) {
+            if (pfwd > b->skull_radius * 0.15f) {
                 Vec3 s_up = (Vec3){0.0f, 1.0f, 0.0f};
                 Vec3 s_right = vec3_norm(vec3_cross(b->dir, s_up));
                 Vec3 s_true_up = vec3_cross(s_right, b->dir);
                 float pright = vec3_dot(delta, s_right);
                 float pup = vec3_dot(delta, s_true_up);
 
-                // Left and right eye orbits
-                float dy_eye = pup - b->skull_radius * 0.08f;
+                // Left and right eye orbits (prominent Dark Souls hollow sockets with clean separation)
+                float dy_eye = pup - b->skull_radius * 0.12f;
                 float dx_l = pright - (-b->skull_radius * 0.36f);
                 float dx_r = pright - (b->skull_radius * 0.36f);
-                float eye_r_sq = (b->skull_radius * 0.28f) * (b->skull_radius * 0.28f);
+                float eye_r_sq = (b->skull_radius * 0.21f) * (b->skull_radius * 0.21f);
 
-                // Nasal aperture
-                float dy_nose = pup - (-b->skull_radius * 0.16f);
+                // Nasal aperture (pyriform cavity centered below eye orbits)
+                float dy_nose = pup - (-b->skull_radius * 0.14f);
                 float dx_nose = pright;
-                float nose_metric = dx_nose * dx_nose * 2.2f + dy_nose * dy_nose;
-                float nose_r_sq = (b->skull_radius * 0.18f) * (b->skull_radius * 0.18f);
+                float nose_metric = dx_nose * dx_nose * 3.6f + dy_nose * dy_nose;
+                float nose_r_sq = (b->skull_radius * 0.15f) * (b->skull_radius * 0.15f);
 
                 if (dx_l * dx_l + dy_eye * dy_eye < eye_r_sq ||
                     dx_r * dx_r + dy_eye * dy_eye < eye_r_sq ||
                     nose_metric < nose_r_sq) {
-                    best_norm = vec3_scale(b->dir, -1.0f); // inward void
-                    char_val = 0.98f; // eye socket void shadow
+                    best_norm = vec3_scale(b->dir, -1.0f); // inward recessed void
+                    char_val = 1.0f; // eye socket / nasal cavity void shadow
+                } else {
+                    // Maxillary dental arch and tooth gaps
+                    float dy_mouth = pup - (-b->skull_radius * 0.38f);
+                    if (fabsf(dy_mouth) < b->skull_radius * 0.10f && fabsf(pright) < b->skull_radius * 0.34f) {
+                        float tooth_phase = cosf(pright / (b->skull_radius * 0.065f) * (float)M_PI);
+                        if (fabsf(dy_mouth) < b->skull_radius * 0.025f || tooth_phase < -0.30f) {
+                            best_norm = vec3_scale(b->dir, -1.0f);
+                            char_val = 0.95f; // dental fissure shadow
+                        }
+                    }
                 }
             }
         }
@@ -2873,11 +2912,11 @@ static void render_scene(void) {
             Vec3 bone_pt = {0,0,0}, bone_norm = {0,1,0};
             float bone_char = 0.0f, bone_heat = 0.0f;
             if (g_is_dark_souls) {
-                // Fast bounding sphere test for bone pile (all 32 bones lie inside radius 3.80f)
+                // Fast bounding sphere test for bone pile (all 55 bones/skulls lie inside radius 4.40f)
                 Vec3 b_c = (Vec3){0.0f, -2.85f, -0.10f};
                 Vec3 ro_b = vec3_sub(ray_orig, b_c);
                 float b_dot_d = vec3_dot(ro_b, ray_dir);
-                float c_b = vec3_dot(ro_b, ro_b) - (3.80f * 3.80f);
+                float c_b = vec3_dot(ro_b, ro_b) - (4.40f * 4.40f);
                 float disc_b = b_dot_d * b_dot_d - c_b;
                 if (disc_b >= 0.0f) {
                     for (int i = 0; i < g_num_bones; i++) {
@@ -3398,8 +3437,8 @@ static void render_scene(void) {
                 Vec3 l_dir = vec3_norm(l_vec);
                 float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
                 float ndotl = fmaxf(0.0f, vec3_dot(bone_norm, l_dir));
-                // Bones catch both warm core light and bright front ambient illumination
-                float front_amb = 0.58f + 0.22f * fmaxf(0.0f, bone_norm.y) - 0.22f * bone_norm.z;
+                // Bones catch both warm core flame light and bright ambient illumination
+                float front_amb = 0.90f + 0.35f * fmaxf(0.0f, bone_norm.y) - 0.30f * bone_norm.z;
                 float light_val = ndotl * atten * light_intensity * 2.2f + front_amb;
 
                 if (bone_char > 0.85f) {
@@ -3415,10 +3454,10 @@ static void render_scene(void) {
                     // Heavily charred calcified bone
                     g_shade_buf[y][x] = PALETTE_BONE[1];
                 } else {
-                    // Ancient weathered bleached bone white (striking pale ivory)
-                    int b_idx = (int)(light_val * 1.8f + 1.2f);
-                    if (bone_char > 0.25f && b_idx > 2) b_idx--; // subtle soot dusting
-                    if (b_idx < 2) b_idx = 2;
+                    // Ancient weathered bleached bone white with rich volumetric depth
+                    int b_idx = (int)(light_val * 1.55f);
+                    if (bone_char > 0.30f && b_idx > 1) b_idx--; // soot dusting
+                    if (b_idx < 1) b_idx = 1;
                     if (b_idx > 4) b_idx = 4;
                     g_shade_buf[y][x] = PALETTE_BONE[b_idx];
                 }
@@ -3441,8 +3480,9 @@ static void render_scene(void) {
                     int nid = g_id_buf[ny][nx];
                     if (nid != curr_id) {
                         if (curr_id >= OBJ_BONE_BASE && nid >= OBJ_BONE_BASE) {
-                            // Do not outline neighboring bones against each other unless distinct depth gap
-                            if (fabsf(g_depth_buf[y][x] - g_depth_buf[ny][nx]) > 0.65f) {
+                            // Clear silhouettes for humanoid skulls and prominent limb bones
+                            float thresh = (curr_id < OBJ_BONE_BASE + 5 || nid < OBJ_BONE_BASE + 5) ? 0.18f : 0.38f;
+                            if (fabsf(g_depth_buf[y][x] - g_depth_buf[ny][nx]) > thresh) {
                                 is_edge = true;
                                 break;
                             }
@@ -3752,31 +3792,92 @@ static int format_frame_buffer(char *buf, int buf_cap) {
         if (n > 0) buf_len += n;
     }
 
-    // Cinematic Dark Souls banner overlay: "B O N F I R E   L I T"
+    // Cinematic Dark Souls banner overlay: "BONFIRE LIT"
     if (g_is_dark_souls && g_banner_timer > 0.0f) {
-        int banner_row = text_rows / 4;
+        float alpha = 1.0f;
+        if (g_banner_timer > 3.3f) {
+            alpha = (4.0f - g_banner_timer) / 0.7f;
+        } else if (g_banner_timer < 0.8f) {
+            alpha = g_banner_timer / 0.8f;
+        }
+        if (alpha < 0.05f) alpha = 0.05f;
+        if (alpha > 1.0f) alpha = 1.0f;
+
+        int r_acc = (int)(185.0f * alpha);
+        int g_acc = (int)(135.0f * alpha);
+        int b_acc = (int)(55.0f * alpha);
+
+        int center_row = text_rows / 2;
+        int banner_row = center_row - 2;
         if (banner_row < 2) banner_row = 2;
-        const char *title = "B O N F I R E   L I T";
-        int title_len = 21;
-        int banner_w = 44;
-        if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
-        int start_col = (g_pixel_w - banner_w) / 2 + 1;
-        int text_col = (g_pixel_w - title_len) / 2 + 1;
 
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[%d;%dH\033[1;38;2;190;150;70m─ ─ ─── ─────────────────────────────── ─── ─ ─\033[0m",
-            banner_row, start_col);
-        if (n > 0) buf_len += n;
+        if (g_pixel_w >= 67) {
+            static const char *s_bonfire_lit_font[3] = {
+                "█▀▀█  █▀▀█  █▄  █  █▀▀  ▀█▀  █▀▀█  █▀▀      █    ▀█▀  ▀█▀",
+                "█▀▀▄  █  █  █ ▀▄█  █▀▀   █   █▄▄▀  █▀▀      █     █    █ ",
+                "▀▀▀   ▀▀▀▀  ▀   ▀  ▀    ▀▀▀  ▀  ▀  ▀▀▀      ▀▀▀  ▀▀▀   ▀ "
+            };
+            int banner_w = 63;
+            int start_col = (g_pixel_w - banner_w) / 2 + 1;
 
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[%d;%dH\033[1;38;2;255;235;150m%s\033[0m",
-            banner_row + 1, text_col, title);
-        if (n > 0) buf_len += n;
+            int r0 = (int)(255.0f * alpha), g0 = (int)(245.0f * alpha), b0 = (int)(185.0f * alpha);
+            int r1 = (int)(250.0f * alpha), g1 = (int)(200.0f * alpha), b1 = (int)(75.0f * alpha);
+            int r2 = (int)(215.0f * alpha), g2 = (int)(135.0f * alpha), b2 = (int)(35.0f * alpha);
 
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[%d;%dH\033[1;38;2;190;150;70m─ ─ ─── ─────────────────────────────── ─── ─ ─\033[0m",
-            banner_row + 2, start_col);
-        if (n > 0) buf_len += n;
+            // Row 0: Top divider bar
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
+                banner_row, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+
+            // Row 1: Big font row 0
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 1, start_col, r0, g0, b0, s_bonfire_lit_font[0]);
+            if (n > 0) buf_len += n;
+
+            // Row 2: Big font row 1
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 2, start_col, r1, g1, b1, s_bonfire_lit_font[1]);
+            if (n > 0) buf_len += n;
+
+            // Row 3: Big font row 2
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 3, start_col, r2, g2, b2, s_bonfire_lit_font[2]);
+            if (n > 0) buf_len += n;
+
+            // Row 4: Bottom divider bar
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
+                banner_row + 4, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+        } else {
+            const char *title = "B O N F I R E   L I T";
+            int title_len = 21;
+            int banner_w = 44;
+            if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
+            int start_col = (g_pixel_w - banner_w) / 2 + 1;
+            int text_col = (g_pixel_w - title_len) / 2 + 1;
+
+            int r_text = (int)(255.0f * alpha), g_text = (int)(225.0f * alpha), b_text = (int)(130.0f * alpha);
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                banner_row, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 1, text_col, r_text, g_text, b_text, title);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                banner_row + 2, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+        }
     }
 
     if (buf_len >= buf_cap) buf_len = buf_cap - 1;
