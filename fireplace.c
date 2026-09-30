@@ -2822,6 +2822,42 @@ int main(int argc, char **argv) {
         return 0;
     }
 
+    if (argc > 1 && strcmp(argv[1], "--turntable") == 0) {
+        const char *out_dir = (argc > 2) ? argv[2] : "/tmp";
+        int num_frames = (argc > 3) ? atoi(argv[3]) : 60;
+        float target_sim = (argc > 4) ? atof(argv[4]) : 300.0f;
+        g_pixel_w = 120;
+        g_pixel_h = 70;
+        init_scene();
+        g_time_scale = 30.0f;
+        while (g_sim_time < target_sim) {
+            update_simulation();
+        }
+        g_time_scale = 1.0f;
+        for (int fr = 0; fr < num_frames; fr++) {
+            g_cam_yaw = (float)fr / (float)num_frames * 2.0f * (float)M_PI;
+            g_cam_pitch = 0.32f;
+            g_anim_time += 0.05f;
+            update_simulation();
+            render_scene();
+            char path[512];
+            snprintf(path, sizeof(path), "%s/frame_%04d.ppm", out_dir, fr);
+            FILE *f = fopen(path, "wb");
+            if (f) {
+                fprintf(f, "P6\n%d %d\n255\n", g_pixel_w, g_pixel_h);
+                for (int y = 0; y < g_pixel_h; y++) {
+                    for (int x = 0; x < g_pixel_w; x++) {
+                        fputc(g_frame[y][x].color.r, f);
+                        fputc(g_frame[y][x].color.g, f);
+                        fputc(g_frame[y][x].color.b, f);
+                    }
+                }
+                fclose(f);
+            }
+        }
+        return 0;
+    }
+
     setup_terminal();
     update_dimensions();
     init_scene();
