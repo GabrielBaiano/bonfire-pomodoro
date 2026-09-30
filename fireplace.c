@@ -105,6 +105,25 @@ static const RGB PALETTE_ASH[] = {
     {215, 208, 195}   // 4: Chalky white ash powder (top surface)
 };
 
+// Natural Hearth Earth & Dirt Soil Palette (Dark organic loam, dry gravel, earth)
+static const RGB PALETTE_DIRT[] = {
+    {24, 18, 14},     // 0: Deep shadow earth
+    {45, 32, 22},     // 1: Moist loam soil
+    {72, 52, 36},     // 2: Weathered dry dirt
+    {102, 76, 52},    // 3: Warm sandy earth
+    {138, 104, 72}    // 4: Firelit ground surface
+};
+
+// Foliage & Leaf Palette (Fresh leaf green -> dry autumn yellow-brown -> charred soot)
+static const RGB PALETTE_LEAF[] = {
+    {28, 45, 16},     // 0: Dark leaf shadow / underside
+    {54, 92, 26},     // 1: Forest green leaf blade
+    {88, 142, 36},    // 2: Vibrant sunlit green leaf
+    {142, 115, 42},   // 3: Dry curing yellow-brown
+    {86, 52, 24},     // 4: Crisp autumn brown
+    {20, 15, 12}      // 5: Carbonized black leaf soot
+};
+
 typedef struct {
     float x, y, z;
 } Vec3;
@@ -157,6 +176,34 @@ typedef struct {
     float volume;
 } AshBed3D;
 
+#define MAX_TWIGS 8
+#define MAX_LEAVES 6
+#define OBJ_TWIG_BASE 600
+#define OBJ_LEAF_BASE 700
+
+typedef struct {
+    int obj_id;
+    Vec3 p1, p2;
+    float radius;
+    float length;
+    Vec3 dir, tangent, bitangent;
+    float temp;
+    float moisture;
+    float burn_progress;
+    bool active;
+} Twig3D;
+
+typedef struct {
+    int obj_id;
+    Vec3 pos;
+    Vec3 normal;
+    float rx, ry;   // Leaf dimensions
+    Vec3 u_dir, v_dir;
+    float temp;
+    float burn_progress;
+    bool active;
+} Leaf3D;
+
 typedef struct {
     Vec3 pos;
     Vec3 vel;
@@ -201,6 +248,7 @@ static float g_fire_z[MAX_PIXEL_ROWS][MAX_COLS];
 
 // 3D Ash Bed (Leito de cinzas acumulado na base)
 static AshBed3D g_ash_bed;
+static float g_burnt_mass = 0.0f;     // Total fractional burned mass across hearth (0.0 to 1.0)
 
 // 3D Particles
 static Spark g_sparks[MAX_SPARKS];
@@ -210,6 +258,12 @@ static AshFlake g_ash_flakes[MAX_ASH_FLAKES];
 static Cylinder3D g_logs[MAX_LOGS];
 static int g_num_logs = 6;
 static int g_stack_mode = 0; // 0: Log Cabin (Fogueira Quadrada), 1: Teepee (Tenda Cônica), 2: Pyramid (Lean-to)
+
+// 3D Kindling Twigs & Dry Leaves (Gravetos e Folhas)
+static Twig3D g_twigs[MAX_TWIGS];
+static int g_num_twigs = 6;
+static Leaf3D g_leaves[MAX_LEAVES];
+static int g_num_leaves = 5;
 
 // 3D Stone Fire Ring (Base da Fogueira)
 static Stone3D g_stones[MAX_STONES];
@@ -317,6 +371,59 @@ static void init_cylinder(Cylinder3D *c, int id, Vec3 p1, Vec3 p2, Vec3 p1_colla
         c->segments[s].glow_intensity = 0.0f;
     }
     recompute_cylinder_axes(c);
+}
+
+static void init_twig(Twig3D *tw, int id, Vec3 p1, Vec3 p2, float radius) {
+    tw->obj_id = id;
+    tw->p1 = p1;
+    tw->p2 = p2;
+    tw->radius = radius;
+    Vec3 axis = vec3_sub(p2, p1);
+    tw->length = vec3_len(axis);
+    tw->dir = vec3_norm(axis);
+    Vec3 ref_up = (Vec3){0.0f, 1.0f, 0.0f};
+    if (fabsf(vec3_dot(ref_up, tw->dir)) > 0.88f) ref_up = (Vec3){1.0f, 0.0f, 0.0f};
+    tw->tangent = vec3_norm(vec3_cross(tw->dir, ref_up));
+    tw->bitangent = vec3_cross(tw->dir, tw->tangent);
+    tw->temp = 0.0f;
+    tw->moisture = 0.10f; // Thin twigs dry quickly
+    tw->burn_progress = 0.0f;
+    tw->active = true;
+}
+
+static void init_leaf(Leaf3D *lf, int id, Vec3 pos, Vec3 normal, float rx, float ry) {
+    lf->obj_id = id;
+    lf->pos = pos;
+    lf->normal = vec3_norm(normal);
+    lf->rx = rx;
+    lf->ry = ry;
+    Vec3 ref_up = (Vec3){0.0f, 1.0f, 0.0f};
+    if (fabsf(vec3_dot(ref_up, lf->normal)) > 0.88f) ref_up = (Vec3){1.0f, 0.0f, 0.0f};
+    lf->u_dir = vec3_norm(vec3_cross(lf->normal, ref_up));
+    lf->v_dir = vec3_cross(lf->normal, lf->u_dir);
+    lf->temp = 0.0f;
+    lf->burn_progress = 0.0f;
+    lf->active = true;
+}
+
+static void build_kindling(void) {
+    g_num_twigs = 6;
+    g_num_leaves = 5;
+
+    // Criss-crossing kindling twigs in the hearth core on the dirt floor
+    init_twig(&g_twigs[0], OBJ_TWIG_BASE + 0, (Vec3){-1.5f, -4.10f, -0.6f}, (Vec3){ 1.6f, -3.85f,  0.4f}, 0.28f);
+    init_twig(&g_twigs[1], OBJ_TWIG_BASE + 1, (Vec3){-0.5f, -4.05f, -1.5f}, (Vec3){ 0.4f, -3.70f,  1.4f}, 0.25f);
+    init_twig(&g_twigs[2], OBJ_TWIG_BASE + 2, (Vec3){-1.2f, -4.10f,  0.8f}, (Vec3){ 1.3f, -3.55f, -0.7f}, 0.30f);
+    init_twig(&g_twigs[3], OBJ_TWIG_BASE + 3, (Vec3){ 1.4f, -4.05f, -0.9f}, (Vec3){-0.9f, -3.65f,  1.1f}, 0.26f);
+    init_twig(&g_twigs[4], OBJ_TWIG_BASE + 4, (Vec3){ 0.2f, -3.75f,  0.3f}, (Vec3){-0.7f, -3.20f, -0.4f}, 0.22f);
+    init_twig(&g_twigs[5], OBJ_TWIG_BASE + 5, (Vec3){-0.4f, -3.80f, -0.3f}, (Vec3){ 0.9f, -3.35f,  0.5f}, 0.24f);
+
+    // Green foliage leaves attached to twigs
+    init_leaf(&g_leaves[0], OBJ_LEAF_BASE + 0, (Vec3){ 0.7f, -3.55f,  0.45f}, (Vec3){ 0.2f, 0.9f,  0.3f}, 0.28f, 0.45f);
+    init_leaf(&g_leaves[1], OBJ_LEAF_BASE + 1, (Vec3){-0.8f, -3.45f, -0.35f}, (Vec3){-0.3f, 0.8f, -0.4f}, 0.26f, 0.40f);
+    init_leaf(&g_leaves[2], OBJ_LEAF_BASE + 2, (Vec3){ 1.0f, -3.40f, -0.55f}, (Vec3){ 0.4f, 0.8f, -0.3f}, 0.25f, 0.42f);
+    init_leaf(&g_leaves[3], OBJ_LEAF_BASE + 3, (Vec3){-0.3f, -3.60f,  0.65f}, (Vec3){-0.2f, 0.9f,  0.3f}, 0.24f, 0.38f);
+    init_leaf(&g_leaves[4], OBJ_LEAF_BASE + 4, (Vec3){ 0.1f, -3.25f, -0.25f}, (Vec3){ 0.1f, 0.9f, -0.2f}, 0.26f, 0.40f);
 }
 
 static void safe_write(int fd, const void *buf, size_t count) {
@@ -461,6 +568,52 @@ static bool intersect_stone(const Stone3D *st, Vec3 ro, Vec3 rd, float *out_t, V
     return true;
 }
 
+static bool intersect_twig(const Twig3D *tw, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+    if (!tw->active || tw->burn_progress >= 1.0f) return false;
+    Vec3 delta_p = vec3_sub(ro, tw->p1);
+    Vec3 d_proj = vec3_sub(rd, vec3_scale(tw->dir, vec3_dot(rd, tw->dir)));
+    Vec3 dp_proj = vec3_sub(delta_p, vec3_scale(tw->dir, vec3_dot(delta_p, tw->dir)));
+    float a = vec3_dot(d_proj, d_proj);
+    if (a < 1e-6f) return false;
+    float b = 2.0f * vec3_dot(d_proj, dp_proj);
+    float cv = vec3_dot(dp_proj, dp_proj) - tw->radius * tw->radius;
+    float disc = b * b - 4.0f * a * cv;
+    if (disc < 0.0f) return false;
+    float sdisc = sqrtf(disc);
+    float t0 = (-b - sdisc) / (2.0f * a);
+    float t1 = (-b + sdisc) / (2.0f * a);
+    float t = (t0 > 0.1f) ? t0 : t1;
+    if (t <= 0.1f) return false;
+    Vec3 pt = vec3_add(ro, vec3_scale(rd, t));
+    if (pt.y < -4.24f) return false; // Occluded by dirt ground
+    float h = vec3_dot(vec3_sub(pt, tw->p1), tw->dir);
+    if (h < 0.0f || h > tw->length) return false;
+    Vec3 axis_pt = vec3_add(tw->p1, vec3_scale(tw->dir, h));
+    Vec3 d_axis = vec3_sub(pt, axis_pt);
+    *out_t = t;
+    *out_pt = pt;
+    *out_norm = vec3_norm(d_axis);
+    return true;
+}
+
+static bool intersect_leaf(const Leaf3D *lf, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm) {
+    if (!lf->active || lf->burn_progress >= 0.95f) return false;
+    float denom = vec3_dot(rd, lf->normal);
+    if (fabsf(denom) < 1e-5f) return false;
+    float t = vec3_dot(vec3_sub(lf->pos, ro), lf->normal) / denom;
+    if (t < 0.1f) return false;
+    Vec3 pt = vec3_add(ro, vec3_scale(rd, t));
+    if (pt.y < -4.24f) return false;
+    Vec3 rel = vec3_sub(pt, lf->pos);
+    float u = vec3_dot(rel, lf->u_dir) / lf->rx;
+    float v = vec3_dot(rel, lf->v_dir) / lf->ry;
+    if (u * u + v * v > 1.0f) return false; // Elliptical leaf disc
+    *out_t = t;
+    *out_pt = pt;
+    *out_norm = (denom < 0.0f) ? lf->normal : vec3_scale(lf->normal, -1.0f);
+    return true;
+}
+
 // -----------------------------------------------------------------------------
 // STACK GENERATORS: Real physical contact points, resting tiers, and gravity
 // -----------------------------------------------------------------------------
@@ -537,7 +690,6 @@ static void build_stack_log_cabin(void) {
 static void build_stack_teepee(void) {
     g_num_logs = 5;
     float ground_y = -4.2f;
-    float base_r = 4.2f;
     float apex_r = 0.65f;
     float apex_y = 2.4f;
 
@@ -547,9 +699,10 @@ static void build_stack_teepee(void) {
     for (int i = 0; i < 5; i++) {
         float angle = angle_offsets[i];
         float r = radii[i];
-        Vec3 p1 = { (base_r + 0.2f * sinf(i * 3.1f)) * cosf(angle), ground_y + r, (base_r + 0.2f * cosf(i * 2.7f)) * sinf(angle) };
+        float contact_r = 4.30f + 0.18f * sinf(i * 3.1f);
+        Vec3 p1 = { contact_r * cosf(angle), ground_y - 0.45f, contact_r * sinf(angle) };
         Vec3 p2 = { apex_r * cosf(angle) + 0.08f * sinf(i * 1.5f), apex_y + 0.12f * cosf(i * 2.0f), apex_r * sinf(angle) };
-        Vec3 p2_coll = { apex_r * 0.35f * cosf(angle), ground_y + r + 0.35f, apex_r * 0.35f * sinf(angle) };
+        Vec3 p2_coll = { apex_r * 0.35f * cosf(angle), ground_y + r * 0.70f, apex_r * 0.35f * sinf(angle) };
 
         init_cylinder(&g_logs[i], i + 1, p1, p2, p1, p2_coll, r, 0.45f);
         g_logs[i].support_log1 = -1;
@@ -615,14 +768,16 @@ static void build_stack_pyramid(void) {
 static void init_scene(void) {
     memset(g_fire_heat, 0, sizeof(g_fire_heat));
     memset(g_next_fire, 0, sizeof(g_next_fire));
+    memset(g_fire_z, 0, sizeof(g_fire_z));
     memset(g_sparks, 0, sizeof(g_sparks));
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
 
     g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
     g_ash_bed.radius_xz = 4.8f;
-    g_ash_bed.height = 0.60f;   // Taller dome: top at y=-3.6, visible between logs
+    g_ash_bed.height = 0.35f;
     g_ash_bed.heat = 0.35f;
     g_ash_bed.volume = 0.0f;
+    g_burnt_mass = 0.0f;
 
     g_sim_time = 0.0f;
     g_anim_time = 0.0f;
@@ -630,6 +785,7 @@ static void init_scene(void) {
     g_force_collapse = false;
 
     build_stone_ring();
+    build_kindling();
 
     if (g_stack_mode == 0) {
         build_stack_log_cabin();
@@ -687,6 +843,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
                         Vec3 d_axis = vec3_sub(pt, axis_pt);
                         float dist_to_axis = vec3_len(d_axis);
                         if (dist_to_axis <= c->radius * 1.15f) {
+                            if (pt.y < -4.24f) continue; // Below dirt floor level
                             Vec3 norm = vec3_scale(d_axis, 1.0f / (dist_to_axis + 1e-6f));
                             float angle = atan2f(vec3_dot(norm, c->bitangent), vec3_dot(norm, c->tangent));
                             float u = (angle + (float)M_PI) / (2.0f * (float)M_PI);
@@ -718,7 +875,7 @@ static bool intersect_cylinder(const Cylinder3D *c, Vec3 ray_orig, Vec3 ray_dir,
         if (t > 0.1f && t < best_t) {
             Vec3 pt = vec3_add(ray_orig, vec3_scale(ray_dir, t));
             float r = vec3_len(vec3_sub(pt, c->p1));
-            if (r <= c->radius) {
+            if (r <= c->radius && pt.y >= -4.24f) {
                 best_t = t;
                 best_pt = pt;
                 best_norm = vec3_scale(c->dir, -1.0f);
@@ -828,8 +985,13 @@ static void update_simulation(void) {
     for (int step = 0; step < num_substeps; step++) {
         float cur_sim_t = g_sim_time - dt + (step + 1) * step_dt;
         float kindle_heat = 0.0f;
-        if (cur_sim_t < 180.0f) {
-            kindle_heat = fmaxf(0.0f, 1.0f - (cur_sim_t / 180.0f));
+        if (cur_sim_t < 240.0f) {
+            // Kindling stays hot for first 60s (tinder/paper phase), then decays over 180s
+            if (cur_sim_t < 60.0f) {
+                kindle_heat = 1.0f;
+            } else {
+                kindle_heat = fmaxf(0.0f, 1.0f - ((cur_sim_t - 60.0f) / 180.0f));
+            }
         }
 
         // ---------------------------------------------------------------------
@@ -854,8 +1016,8 @@ static void update_simulation(void) {
                 if (kindle_heat > 0.02f) {
                     float d_k = vec3_len(vec3_sub(seg_p, kindle_pos));
                     float d_surf = fmaxf(0.0f, d_k - g_logs[i].radius - 1.5f);
-                    if (d_surf < 2.5f) {
-                        g_logs[i].segments[s].temp += 0.0075f * (1.0f - d_surf / 2.5f) * kindle_heat * eta_r * step_dt;
+                    if (d_surf < 2.8f) {
+                        g_logs[i].segments[s].temp += 0.016f * (1.0f - d_surf / 2.8f) * kindle_heat * eta_r * step_dt;
                     }
                 }
 
@@ -864,7 +1026,7 @@ static void update_simulation(void) {
                     float bed_dy = fmaxf(0.0f, seg_p.y - g_ash_bed.center.y);
                     if (bed_dy < 3.2f) {
                         float bed_fac = (1.0f - bed_dy / 3.2f) * eta_r;
-                        g_logs[i].segments[s].temp += 0.00045f * g_ash_bed.heat * bed_fac * step_dt;
+                        g_logs[i].segments[s].temp += 0.0010f * g_ash_bed.heat * bed_fac * step_dt;
                     }
                 }
 
@@ -872,29 +1034,28 @@ static void update_simulation(void) {
                 for (int j = 0; j < g_num_logs; j++) {
                     if (i == j) continue;
                     for (int sj = 0; sj < NUM_LOG_SEGS; sj++) {
-                        if (g_logs[j].segments[sj].burn_progress > 0.05f && g_logs[j].segments[sj].temp > 0.35f && g_logs[j].segments[sj].structural_mass > 0.10f) {
+                        if (g_logs[j].segments[sj].burn_progress > 0.03f && g_logs[j].segments[sj].temp > 0.30f && g_logs[j].segments[sj].structural_mass > 0.10f) {
                             float tj = (sj + 0.5f) / (float)NUM_LOG_SEGS;
                             Vec3 pj = vec3_add(g_logs[j].p1, vec3_scale(g_logs[j].axis, tj));
                             float d_cross = vec3_len(vec3_sub(seg_p, pj));
                             float d_cross_surf = fmaxf(0.0f, d_cross - g_logs[i].radius - g_logs[j].radius);
-                            if (d_cross_surf < 1.3f) {
-                                float rad_power = (1.0f - d_cross_surf / 1.3f) * (0.25f + 0.75f * eta_r);
-                                g_logs[i].segments[s].temp += 0.00065f * rad_power * step_dt;
+                            if (d_cross_surf < 1.6f) {
+                                float rad_power = (1.0f - d_cross_surf / 1.6f) * (0.30f + 0.70f * eta_r);
+                                g_logs[i].segments[s].temp += 0.0028f * rad_power * step_dt;
                             }
                         }
                     }
                 }
 
                 // 4. Moisture Evaporation & Latent Heat Clamping
-                if (g_logs[i].segments[s].temp > 0.10f && g_logs[i].segments[s].moisture > 0.001f) {
-                    float evap = 0.00055f * (g_logs[i].segments[s].temp - 0.08f) * step_dt;
+                if (g_logs[i].segments[s].temp > 0.08f && g_logs[i].segments[s].moisture > 0.001f) {
+                    float evap = (0.0018f * (g_logs[i].segments[s].temp - 0.05f) + 0.0030f * kindle_heat * eta_r) * step_dt;
                     if (evap > g_logs[i].segments[s].moisture) evap = g_logs[i].segments[s].moisture;
                     g_logs[i].segments[s].moisture -= evap;
                 }
-                if (g_logs[i].segments[s].moisture > 0.005f) {
-                    // Boiling water phase change clamps temperature to ~100C (0.24 normalized)
-                    if (g_logs[i].segments[s].temp > 0.24f) {
-                        g_logs[i].segments[s].temp = 0.24f;
+                if (g_logs[i].segments[s].moisture > 0.03f) {
+                    if (g_logs[i].segments[s].temp > 0.28f) {
+                        g_logs[i].segments[s].temp = 0.28f;
                     }
                 }
 
@@ -910,15 +1071,15 @@ static void update_simulation(void) {
                 float cool_factor = 1.0f - 0.75f * eta_r;
                 g_logs[i].segments[s].temp -= 0.00025f * cur * cool_factor * step_dt;
 
-                // 7. Active combustion & Pyrolysis: requires dry wood (moisture <= 0.005) and T > 0.35
-                if (g_logs[i].segments[s].moisture <= 0.005f && g_logs[i].segments[s].temp > 0.35f) {
+                // 7. Active combustion & Pyrolysis: requires dry wood (moisture <= 0.04) and T > 0.30
+                if (g_logs[i].segments[s].moisture <= 0.04f && g_logs[i].segments[s].temp > 0.30f) {
                     if (eta_r > 0.05f) {
-                        float exo = 0.00045f * (g_logs[i].segments[s].temp - 0.30f) * eta_r * g_logs[i].segments[s].structural_mass * step_dt;
+                        float exo = 0.0016f * (g_logs[i].segments[s].temp - 0.28f) * (0.35f + 0.65f * eta_r) * g_logs[i].segments[s].structural_mass * step_dt;
                         g_logs[i].segments[s].temp = fminf(1.0f, g_logs[i].segments[s].temp + exo);
-                        float burn_rate = 0.00045f * (g_logs[i].segments[s].temp - 0.30f) * (0.20f + 0.80f * eta_r) * step_dt;
+                        float burn_rate = 0.00035f * (g_logs[i].segments[s].temp - 0.25f) * (0.25f + 0.75f * eta_r) * step_dt;
                         g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
                     } else {
-                        float burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.30f) * step_dt;
+                        float burn_rate = 0.00008f * (g_logs[i].segments[s].temp - 0.25f) * step_dt;
                         g_logs[i].segments[s].burn_progress = fminf(1.0f, g_logs[i].segments[s].burn_progress + burn_rate);
                     }
 
@@ -974,6 +1135,76 @@ static void update_simulation(void) {
         }
 
         // ---------------------------------------------------------------------
+        // KINDLING LEAVES & TWIGS COMBUSTION (Gravetos e Folhas)
+        // ---------------------------------------------------------------------
+        // Fast burning dry leaves: flare quickly, produce sparks, curl & soot
+        for (int l = 0; l < g_num_leaves; l++) {
+            if (!g_leaves[l].active) continue;
+            if (kindle_heat > 0.02f || cur_sim_t < 60.0f) {
+                g_leaves[l].temp += 0.055f * fmaxf(kindle_heat, 0.4f) * step_dt;
+            }
+            if (g_leaves[l].temp > 0.20f) {
+                float leaf_burn = 0.038f * (g_leaves[l].temp - 0.15f) * step_dt;
+                g_leaves[l].burn_progress += leaf_burn;
+                g_leaves[l].temp = fminf(1.0f, g_leaves[l].temp + 0.065f * step_dt);
+                // Dry leaf crackle sparks
+                if (rand_f() < 0.20f * step_dt * 40.0f) {
+                    Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 1.8f, rand_f() * 3.5f + 1.5f, (rand_f() - 0.5f) * 1.8f};
+                    spawn_spark_3d(g_leaves[l].pos, sp_v, rand_range(12, 28), PALETTE_EMBERS[rand_range(2, 4)]);
+                }
+            }
+            if (g_leaves[l].burn_progress >= 0.95f) {
+                g_leaves[l].active = false;
+            }
+        }
+
+        // Kindling twigs: thin branches that catch in 20-30s, burn hot, ignite main logs
+        for (int tw = 0; tw < g_num_twigs; tw++) {
+            if (!g_twigs[tw].active) continue;
+            if (kindle_heat > 0.02f) {
+                g_twigs[tw].temp += 0.030f * kindle_heat * step_dt;
+            }
+            // Heat from leaves
+            for (int l = 0; l < g_num_leaves; l++) {
+                if (g_leaves[l].burn_progress > 0.1f && g_leaves[l].active) {
+                    float d = vec3_len(vec3_sub(g_leaves[l].pos, g_twigs[tw].p1));
+                    if (d < 1.4f) g_twigs[tw].temp += 0.020f * (1.0f - d / 1.4f) * step_dt;
+                }
+            }
+            // Evaporation
+            if (g_twigs[tw].temp > 0.08f && g_twigs[tw].moisture > 0.001f) {
+                float evap = 0.0065f * (g_twigs[tw].temp - 0.05f) * step_dt;
+                g_twigs[tw].moisture = fmaxf(0.0f, g_twigs[tw].moisture - evap);
+            }
+            // Twig ignition & fast combustion
+            if (g_twigs[tw].moisture <= 0.04f && g_twigs[tw].temp > 0.25f) {
+                float exo = 0.0050f * (g_twigs[tw].temp - 0.20f) * step_dt;
+                g_twigs[tw].temp = fminf(1.0f, g_twigs[tw].temp + exo);
+                float burn = 0.0011f * (g_twigs[tw].temp - 0.20f) * step_dt;
+                g_twigs[tw].burn_progress += burn;
+            }
+            if (g_twigs[tw].burn_progress >= 1.0f) {
+                g_twigs[tw].active = false;
+                g_twigs[tw].temp = 0.15f;
+            }
+
+            // Transfer heat from burning twigs into adjacent big logs!
+            if (g_twigs[tw].temp > 0.30f) {
+                Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
+                for (int i = 0; i < g_num_logs; i++) {
+                    for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                        float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
+                        Vec3 seg_p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
+                        float d = vec3_len(vec3_sub(seg_p, mid_tw));
+                        if (d < 1.8f) {
+                            g_logs[i].segments[s].temp += 0.0040f * (1.0f - d / 1.8f) * g_twigs[tw].temp * step_dt;
+                        }
+                    }
+                }
+            }
+        }
+
+        // ---------------------------------------------------------------------
         // ASH BED & REACTION STATUS
         // ---------------------------------------------------------------------
         float total_mass = 0.0f;
@@ -982,11 +1213,12 @@ static void update_simulation(void) {
         for (int i = 0; i < g_num_logs; i++) {
             for (int s = 0; s < NUM_LOG_SEGS; s++) {
                 total_mass += g_logs[i].segments[s].structural_mass;
-                if (g_logs[i].segments[s].temp > 0.35f && g_logs[i].segments[s].moisture <= 0.005f) active_burning_segs++;
+                if (g_logs[i].segments[s].temp > 0.30f && g_logs[i].segments[s].moisture <= 0.04f) active_burning_segs++;
             }
         }
         float avg_mass = total_mass / (float)total_segs;
         float burnt_mass = 1.0f - avg_mass;
+        g_burnt_mass = burnt_mass;
 
         // Ash bed height: smooth exponential approach to target height
         // Never recalculate every sub-step directly — smooth to avoid geometry glitch
@@ -1068,7 +1300,7 @@ static void update_simulation(void) {
     }
 
     // -------------------------------------------------------------------------
-    // STRICT FIRE PROJECTION: Heat originates strictly from burning wood
+    // STRICT FIRE PROJECTION: Heat originates strictly from burning wood & kindling
     // -------------------------------------------------------------------------
     Vec3 target = (Vec3){0.0f, -1.2f, 0.0f};
     float cam_dist = 28.0f;
@@ -1085,27 +1317,38 @@ static void update_simulation(void) {
     float world_w = 22.0f;
     float world_h = 14.0f;
 
-    // Reset next fire frame
+    // Reset next fire frame and depth buffer
     memset(g_next_fire, 0, sizeof(g_next_fire));
+    for (int y = 0; y < g_pixel_h; y++) {
+        for (int x = 0; x < g_pixel_w; x++) {
+            g_fire_z[y][x] = 1e9f;
+        }
+    }
 
-    // 1. Kindling flame (early stage only)
-    float cur_kindle_heat = (g_sim_time < 180.0f) ? fmaxf(0.0f, 1.0f - (g_sim_time / 180.0f)) : 0.0f;
-    if (cur_kindle_heat > 0.05f) {
-        Vec3 rel_k = vec3_sub(kindle_pos, cam_pos);
-        int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
-        int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
-        float kz = vec3_dot(rel_k, fwd);
+    // 1. Kindling flames emitted directly from twigs and leaves on the hearth floor!
+    float cur_kindle_heat = (g_sim_time < 240.0f) ? (g_sim_time < 60.0f ? 1.0f : fmaxf(0.0f, 1.0f - (g_sim_time - 60.0f) / 180.0f)) : 0.0f;
+    for (int tw = 0; tw < g_num_twigs; tw++) {
+        float tw_heat = (cur_kindle_heat > 0.05f) ? fmaxf(cur_kindle_heat * 0.85f, g_twigs[tw].temp) : (g_twigs[tw].active ? g_twigs[tw].temp : 0.0f);
+        if (tw_heat > 0.25f) {
+            Vec3 mid_tw = vec3_scale(vec3_add(g_twigs[tw].p1, g_twigs[tw].p2), 0.5f);
+            Vec3 rel_k = vec3_sub(mid_tw, cam_pos);
+            int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
+            int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
+            float kz = vec3_dot(rel_k, fwd);
+            float flame_z = kz - g_twigs[tw].radius * 0.9f;
+            float flame_h = tw_heat * 0.92f;
 
-        for (int dy = -3; dy <= 2; dy++) {
-            for (int dx = -3; dx <= 3; dx++) {
-                int px = kx + dx;
-                int py = ky + dy;
-                if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
-                    float d = sqrtf((dx * 0.9f)*(dx * 0.9f) + (dy * 1.5f)*(dy * 1.5f));
-                    if (d < 3.2f) {
-                        float h = cur_kindle_heat * 0.85f * (1.0f - d / 3.2f);
-                        g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
-                        g_fire_z[py][px] = kz - 0.25f;
+            for (int dy = -2; dy <= 1; dy++) {
+                for (int dx = -2; dx <= 2; dx++) {
+                    int px = kx + dx;
+                    int py = ky + dy;
+                    if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                        float d = sqrtf((dx * 1.0f)*(dx * 1.0f) + (dy * 1.5f)*(dy * 1.5f));
+                        if (d < 2.5f) {
+                            float val = flame_h * (1.0f - d / 2.5f);
+                            g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], val);
+                            if (flame_z < g_fire_z[py][px]) g_fire_z[py][px] = flame_z;
+                        }
                     }
                 }
             }
@@ -1118,7 +1361,7 @@ static void update_simulation(void) {
             float temp = g_logs[i].segments[s].temp;
             float moisture = g_logs[i].segments[s].moisture;
             // Only dried segments ignite into open flames!
-            if (temp > 0.38f && moisture <= 0.02f) {
+            if (temp > 0.30f && moisture <= 0.05f) {
                 float t_val = (s + 0.5f) / (float)NUM_LOG_SEGS;
                 Vec3 p = vec3_add(g_logs[i].p1, vec3_scale(g_logs[i].axis, t_val));
                 if (g_logs[i].sag_amount > 0.01f) {
@@ -1136,6 +1379,7 @@ static void update_simulation(void) {
                 int px = (int)(((vec3_dot(rel_p, right) / world_w) + 0.5f) * g_pixel_w);
                 int py = (int)((0.5f - (vec3_dot(rel_p, up) / world_h)) * g_pixel_h);
                 float pz = vec3_dot(rel_p, fwd);
+                float flame_z = pz - g_logs[i].radius * 0.85f;
 
                 float flame_h = temp * (0.25f + 0.75f * eta_r) * 1.05f;
                 for (int dy = -3; dy <= 1; dy++) {
@@ -1147,7 +1391,7 @@ static void update_simulation(void) {
                             if (d < 3.2f) {
                                 float val = flame_h * (1.0f - d / 3.2f);
                                 g_fire_heat[sy][sx] = fmaxf(g_fire_heat[sy][sx], val);
-                                g_fire_z[sy][sx] = pz - 0.25f;
+                                if (flame_z < g_fire_z[sy][sx]) g_fire_z[sy][sx] = flame_z;
                             }
                         }
                     }
@@ -1175,7 +1419,9 @@ static void update_simulation(void) {
             float decay = 0.032f + 0.030f * rand_f();
             float val = fmaxf(0.0f, below - decay);
             g_next_fire[y][x] = val;
-            g_fire_z[y][x] = g_fire_z[y + 1][src_x] - 0.02f;
+            if (val > 0.05f) {
+                g_fire_z[y][x] = g_fire_z[y + 1][src_x];
+            }
         }
     }
 
@@ -1327,6 +1573,40 @@ static void render_scene(void) {
                         hit_seg = seg;
                         hit_log = &g_logs[i];
                         hit_type = 2;
+                    }
+                }
+            }
+
+            // Test 3D Twigs
+            Twig3D *hit_twig = NULL;
+            Vec3 twig_pt = {0,0,0}, twig_norm = {0,1,0};
+            for (int i = 0; i < g_num_twigs; i++) {
+                float t;
+                Vec3 pt, norm;
+                if (intersect_twig(&g_twigs[i], ray_orig, ray_dir, &t, &pt, &norm)) {
+                    if (t < closest_t) {
+                        closest_t = t;
+                        twig_pt = pt;
+                        twig_norm = norm;
+                        hit_twig = &g_twigs[i];
+                        hit_type = 4;
+                    }
+                }
+            }
+
+            // Test 3D Foliage Leaves
+            Leaf3D *hit_leaf = NULL;
+            Vec3 leaf_pt = {0,0,0}, leaf_norm = {0,1,0};
+            for (int i = 0; i < g_num_leaves; i++) {
+                float t;
+                Vec3 pt, norm;
+                if (intersect_leaf(&g_leaves[i], ray_orig, ray_dir, &t, &pt, &norm)) {
+                    if (t < closest_t) {
+                        closest_t = t;
+                        leaf_pt = pt;
+                        leaf_norm = norm;
+                        hit_leaf = &g_leaves[i];
+                        hit_type = 5;
                     }
                 }
             }
@@ -1496,75 +1776,134 @@ static void render_scene(void) {
                 float ambient = 0.20f + 0.14f * fmaxf(0.0f, ash_bed_norm.y);
                 float s_val = ndotl * atten * light_intensity * 2.0f + ambient;
 
-                // Radial position on the ash bed surface (0 = center, 1 = edge)
                 float r_core = sqrtf(ash_bed_pt.x * ash_bed_pt.x + ash_bed_pt.z * ash_bed_pt.z);
-                float r_norm_bed = fminf(1.0f, r_core / g_ash_bed.radius_xz);
                 float core_heat = g_ash_bed.heat * fmaxf(0.0f, 1.0f - r_core / 4.2f);
 
-                // Height factor — points near the top of the dome get more light ash
-                float h_factor = fmaxf(0.0f, ash_bed_norm.y); // upward-facing = top surface
+                // Natural hearth floor: dirt/earth ground by default
+                // Ash accumulates dynamically as wood is consumed (g_burnt_mass)
+                float ash_radius = 1.2f + 3.6f * g_burnt_mass;
+                float ash_coverage = 0.0f;
+                if (r_core < ash_radius) {
+                    ash_coverage = (1.0f - r_core / ash_radius) * (0.25f + 0.75f * g_burnt_mass);
+                }
 
-                // Natural ash accumulation noise — irregular pockets and mounds
-                float n1 = sinf(ash_bed_pt.x * 2.1f + 0.3f) * cosf(ash_bed_pt.z * 1.8f + 0.7f);
-                float n2 = sinf(ash_bed_pt.x * 0.7f + ash_bed_pt.z * 1.1f + 1.2f);
-                float surface_noise = (n1 * 0.6f + n2 * 0.4f) * 0.5f + 0.5f;  // [0, 1]
-
-                // Fissure pattern — cracks where embers peek through
-                float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
-                float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
-                float fissure = fabsf(f1 * f2);
-
-                if (fissure < 0.15f && core_heat > 0.25f) {
-                    // Incandescent ember vein glowing through fissures
-                    float emb_heat = core_heat * (1.0f - fissure / 0.15f);
-                    int emb_idx = (int)(emb_heat * 3.5f);
-                    if (emb_idx < 0) emb_idx = 0;
-                    if (emb_idx > 3) emb_idx = 3;
-                    g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
+                if (ash_coverage < 0.15f) {
+                    // NATURAL HEARTH DIRT / COMPACTED EARTH
+                    float dirt_noise = (sinf(ash_bed_pt.x * 2.8f + 0.4f) * cosf(ash_bed_pt.z * 2.5f + 0.8f)) * 0.5f + 0.5f;
+                    int d_idx = (int)((s_val * 0.95f + dirt_noise * 0.20f) * 2.4f);
+                    if (d_idx < 0) d_idx = 0;
+                    if (d_idx > 4) d_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_DIRT[d_idx];
                 } else {
-                    // Ash accumulation: inner bed = dark charcoal, outer rim = chalky powder
-                    // More burnt material = higher ash bed = lighter top surface
-                    float ash_depth = g_ash_bed.height / 1.4f; // 0=thin, 1=full
+                    // ACCUMULATED ASH & COALS
+                    float f1 = sinf(ash_bed_pt.x * 1.3f + ash_bed_pt.z * 0.7f);
+                    float f2 = cosf(ash_bed_pt.z * 1.4f - ash_bed_pt.x * 0.6f);
+                    float fissure = fabsf(f1 * f2);
 
-                    // Base index driven by radial zone:
-                    // - Core: dark charcoal (hot, dense)
-                    // - Mid: medium warm ash
-                    // - Rim: pale chalky powder
-                    float zone = r_norm_bed * 0.6f + h_factor * 0.25f + surface_noise * 0.15f;
-                    zone = fminf(1.0f, zone + ash_depth * 0.2f); // deeper = slightly lighter overall
-
-                    int ash_idx;
-                    if (zone < 0.22f) {
-                        // Inner core — hot charcoal, possibly with ember glow
-                        ash_idx = (int)(s_val * 1.2f);
-                        if (ash_idx < 0) ash_idx = 0;
-                        if (ash_idx > 1) ash_idx = 1;
-                        // Add warm orange cast near center when hot
-                        if (core_heat > 0.3f && ash_idx == 1) {
-                            // Blend toward charred-brown instead of cool grey
-                            g_shade_buf[y][x] = (RGB){
-                                (uint8_t)fminf(255, 58 + (int)(core_heat * 55)),
-                                (uint8_t)(50 + (int)(core_heat * 20)),
-                                (uint8_t)(28 + (int)(core_heat * 5))
-                            };
-                            goto ash_done;
-                        }
-                    } else if (zone < 0.48f) {
-                        ash_idx = (int)(s_val * 1.8f + 0.5f);
-                        if (ash_idx < 1) ash_idx = 1;
-                        if (ash_idx > 2) ash_idx = 2;
-                    } else if (zone < 0.72f) {
-                        ash_idx = (int)(s_val * 2.0f + 1.0f);
-                        if (ash_idx < 2) ash_idx = 2;
-                        if (ash_idx > 3) ash_idx = 3;
+                    if (fissure < 0.15f && core_heat > 0.22f && r_core < 2.5f) {
+                        // Deep incandescent ember vein
+                        float emb_heat = core_heat * (1.0f - fissure / 0.15f);
+                        int emb_idx = (int)(emb_heat * 3.5f);
+                        if (emb_idx < 0) emb_idx = 0;
+                        if (emb_idx > 3) emb_idx = 3;
+                        g_shade_buf[y][x] = PALETTE_EMBERS[emb_idx];
                     } else {
-                        // Outer rim and top — pale chalky ash deposit
-                        ash_idx = (int)(s_val * 2.2f + 1.5f);
-                        if (ash_idx < 3) ash_idx = 3;
-                        if (ash_idx > 4) ash_idx = 4;
+                        // Calcified ash progression
+                        int ash_idx;
+                        if (r_core < 1.8f) {
+                            // Charcoal core with warm cast
+                            ash_idx = (int)(s_val * 1.2f);
+                            if (ash_idx < 0) ash_idx = 0;
+                            if (ash_idx > 1) ash_idx = 1;
+                            if (core_heat > 0.25f && ash_idx == 1) {
+                                g_shade_buf[y][x] = (RGB){
+                                    (uint8_t)fminf(255, 58 + (int)(core_heat * 50)),
+                                    (uint8_t)(50 + (int)(core_heat * 20)),
+                                    (uint8_t)(28 + (int)(core_heat * 5))
+                                };
+                                goto ash_done;
+                            }
+                        } else if (ash_coverage < 0.50f || g_burnt_mass < 0.40f) {
+                            // Early mid-grey ash
+                            ash_idx = (int)(s_val * 1.8f);
+                            if (ash_idx < 1) ash_idx = 1;
+                            if (ash_idx > 2) ash_idx = 2;
+                        } else if (ash_coverage < 0.75f || g_burnt_mass < 0.75f) {
+                            // Mid to light ash
+                            ash_idx = (int)(s_val * 2.0f + 0.8f);
+                            if (ash_idx < 2) ash_idx = 2;
+                            if (ash_idx > 3) ash_idx = 3;
+                        } else {
+                            // Late-stage thick chalky white ash
+                            ash_idx = (int)(s_val * 2.2f + 1.2f);
+                            if (ash_idx < 3) ash_idx = 3;
+                            if (ash_idx > 4) ash_idx = 4;
+                        }
+                        g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
+                        ash_done:;
                     }
-                    g_shade_buf[y][x] = PALETTE_ASH[ash_idx];
-                    ash_done:;
+                }
+
+            } else if (hit_type == 4 && hit_twig != NULL) {
+                g_id_buf[y][x] = hit_twig->obj_id;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(twig_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, twig_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, vec3_dot(twig_norm, l_dir));
+                float ambient = 0.25f + 0.12f * fmaxf(0.0f, twig_norm.y);
+                float light_val = ndotl * atten * light_intensity * 2.2f + ambient;
+
+                if (hit_twig->burn_progress > 0.65f) {
+                    if (hit_twig->temp > 0.35f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[1];
+                    } else {
+                        g_shade_buf[y][x] = PALETTE_CHARRED[1];
+                    }
+                } else if (hit_twig->burn_progress > 0.25f) {
+                    if (hit_twig->temp > 0.35f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[0];
+                    } else {
+                        g_shade_buf[y][x] = PALETTE_CHARRED[2];
+                    }
+                } else {
+                    int b_idx = (int)(light_val * 2.4f + 1.2f);
+                    if (b_idx < 1) b_idx = 1;
+                    if (b_idx > 4) b_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_WOOD[b_idx];
+                }
+
+            } else if (hit_type == 5 && hit_leaf != NULL) {
+                g_id_buf[y][x] = hit_leaf->obj_id;
+                g_depth_buf[y][x] = vec3_dot(vec3_sub(leaf_pt, cam_pos), fwd);
+
+                Vec3 l_vec = vec3_sub(light_pos, leaf_pt);
+                float l_dist = vec3_len(l_vec);
+                Vec3 l_dir = vec3_norm(l_vec);
+                float atten = 1.0f / (1.0f + 0.08f * l_dist + 0.015f * l_dist * l_dist);
+                float ndotl = fmaxf(0.0f, fabsf(vec3_dot(leaf_norm, l_dir)));
+                float ambient = 0.30f + 0.15f * fmaxf(0.0f, leaf_norm.y);
+                float light_val = ndotl * atten * light_intensity * 2.0f + ambient;
+
+                float leaf_burn = hit_leaf->burn_progress;
+                if (leaf_burn > 0.60f) {
+                    if (hit_leaf->temp > 0.30f) {
+                        g_shade_buf[y][x] = PALETTE_EMBERS[2];
+                    } else {
+                        g_shade_buf[y][x] = PALETTE_LEAF[5];
+                    }
+                } else if (leaf_burn > 0.25f) {
+                    int c_idx = (int)(light_val * 1.5f + 3.0f);
+                    if (c_idx < 3) c_idx = 3;
+                    if (c_idx > 4) c_idx = 4;
+                    g_shade_buf[y][x] = PALETTE_LEAF[c_idx];
+                } else {
+                    int g_idx = (int)(light_val * 1.8f + 1.0f);
+                    if (g_idx < 1) g_idx = 1;
+                    if (g_idx > 2) g_idx = 2;
+                    g_shade_buf[y][x] = PALETTE_LEAF[g_idx];
                 }
             }
         }
@@ -1596,8 +1935,10 @@ static void render_scene(void) {
             }
 
             if (is_edge) {
-                if (curr_id == OBJ_ASH_BED) {
-                    g_frame[y][x].color = PALETTE_ASH[0];
+                if (curr_id >= OBJ_LEAF_BASE) {
+                    g_frame[y][x].color = g_shade_buf[y][x];
+                } else if (curr_id == OBJ_ASH_BED) {
+                    g_frame[y][x].color = PALETTE_DIRT[0];
                 } else {
                     g_frame[y][x].color = PALETTE_WOOD[0]; // Dark outline
                 }
@@ -1622,10 +1963,7 @@ static void render_scene(void) {
                 else fire_col = PALETTE_EMBERS[0];
 
                 if (g_id_buf[y][x] > 0) {
-                    if (g_fire_z[y][x] < g_depth_buf[y][x]) {
-                        g_frame[y][x].color = fire_col;
-                        g_frame[y][x].is_sky = false;
-                    } else if (heat > 0.55f) {
+                    if (g_id_buf[y][x] == OBJ_ASH_BED || g_fire_z[y][x] < g_depth_buf[y][x] - 0.06f) {
                         g_frame[y][x].color = fire_col;
                         g_frame[y][x].is_sky = false;
                     }
@@ -1661,7 +1999,7 @@ static void render_scene(void) {
             int sy = (int)((0.5f - (vec3_dot(p_rel, up) / world_h)) * g_pixel_h);
             float spark_z = vec3_dot(p_rel, fwd);
             if (sx >= 0 && sx < g_pixel_w && sy >= 0 && sy < g_pixel_h) {
-                if (spark_z < g_depth_buf[sy][sx] || g_fire_heat[sy][sx] > 0.2f) {
+                if (g_id_buf[sy][sx] == OBJ_ASH_BED || spark_z < g_depth_buf[sy][sx] - 0.06f) {
                     g_frame[sy][sx].color = g_sparks[i].color;
                     g_frame[sy][sx].is_sky = false;
                 }
