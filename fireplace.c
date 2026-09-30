@@ -405,6 +405,9 @@ static int g_num_logs = 5;
 
 // Dark Souls Coiled Sword (Espada Espiral) & Bone Pile
 static bool g_is_dark_souls = false;
+static bool g_bonfire_lit = true;
+static float g_ignition_timer = 0.0f;
+static float g_banner_timer = 0.0f;
 static Sword3D g_sword;
 static Bone3D g_bones[MAX_BONES];
 static int g_num_bones = 0;
@@ -950,7 +953,7 @@ static void build_dark_souls_scene(void) {
     g_ash_bed.center = (Vec3){0.0f, -4.20f, 0.0f};
     g_ash_bed.radius_xz = 4.1f;
     g_ash_bed.height = 1.62f; // Summit at y = -2.58f
-    g_ash_bed.heat = 1.0f;
+    g_ash_bed.heat = g_bonfire_lit ? 1.0f : 0.0f;
     g_ash_bed.volume = 0.92f;
     g_burnt_mass = 0.95f;
 
@@ -978,7 +981,7 @@ static void build_dark_souls_scene(void) {
         g_sword.blade_segs[i].p2 = curr_p;
         g_sword.blade_segs[i].radius = radius;
         // Thermal incandescence climbs the coiled sword (intense ember gradient)
-        g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f));
+        g_sword.blade_segs[i].heat = g_bonfire_lit ? fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f)) : 0.0f;
         prev_p = curr_p;
     }
 
@@ -1306,6 +1309,15 @@ static bool intersect_bone(const Bone3D *b, Vec3 ro, Vec3 rd, float *out_t, Vec3
 
 static bool intersect_sword(const Sword3D *sw, Vec3 ro, Vec3 rd, float *out_t, Vec3 *out_pt, Vec3 *out_norm, float *out_heat, int *out_part) {
     if (!sw->active) return false;
+
+    // Fast bounding capsule test enclosing entire sword (blade, guard, quillons, grip, pommel)
+    // Radius 1.85f strictly covers the widest quillons and spiral offsets.
+    float b_t;
+    Vec3 b_pt, b_norm;
+    if (!intersect_capsule(sw->root_pos, sw->pommel_tip, 1.85f, ro, rd, &b_t, &b_pt, &b_norm)) {
+        return false;
+    }
+
     float best_t = 1e9f;
     bool hit = false;
     Vec3 best_pt = {0,0,0}, best_norm = {0,1,0};
@@ -1767,8 +1779,19 @@ static void update_simulation(void) {
     // Full lifecycle (0 to 3000s) maps directly to g_cycle_duration real seconds
     float rate_mult = (g_cycle_duration > 0.0f) ? (3000.0f / g_cycle_duration) : 1.0f;
     float dt = 0.025f * g_time_scale * rate_mult;
-    g_sim_time += dt;
+    if (!g_is_dark_souls || g_bonfire_lit) {
+        g_sim_time += dt;
+    }
     g_anim_time += 0.025f;
+
+    if (g_banner_timer > 0.0f) {
+        g_banner_timer -= 0.025f * g_time_scale;
+        if (g_banner_timer < 0.0f) g_banner_timer = 0.0f;
+    }
+    if (g_ignition_timer > 0.0f) {
+        g_ignition_timer += 0.025f * g_time_scale;
+        if (g_ignition_timer > 3.0f) g_ignition_timer = 3.0f;
+    }
 
     // Ambient Wind oscillation & non-linear turbulence
     if (rand_f() < 0.05f) {
@@ -2379,8 +2402,8 @@ static void update_simulation(void) {
     // -------------------------------------------------------------------------
     // STRICT FIRE PROJECTION: Heat originates strictly from burning wood & kindling
     // -------------------------------------------------------------------------
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 0.70f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 22.0f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.05f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 24.5f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2391,8 +2414,8 @@ static void update_simulation(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 16.5f : 22.0f;
-    float world_h = g_is_dark_souls ? 12.2f : 14.0f;
+    float world_w = g_is_dark_souls ? 20.8f : 22.0f;
+    float world_h = g_is_dark_souls ? 15.2f : 14.0f;
 
     // Reset next fire frame and depth buffer
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -2403,70 +2426,85 @@ static void update_simulation(void) {
     }
 
     if (g_is_dark_souls && g_sword.active) {
-        // Base mound glowing ember core - compact hot heart at sword entry
-        for (float r = 0.0f; r <= 0.95f; r += 0.22f) {
-            for (float a = 0.0f; a < 6.28f; a += 0.85f) {
-                Vec3 p_emb = (Vec3){ r * cosf(a) + 0.04f, -2.80f, r * sinf(a) - 0.04f };
-                Vec3 rel_k = vec3_sub(p_emb, cam_pos);
-                int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
-                int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
-                float kz = vec3_dot(rel_k, fwd);
-                float val = 0.96f * (1.0f - r / 1.15f);
-                for (int dy = -1; dy <= 1; dy++) {
-                    for (int dx = -1; dx <= 1; dx++) {
-                        int px = kx + dx, py = ky + dy;
-                        if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
-                            float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.5f);
-                            if (d < 1.8f) {
-                                float h = val * (1.0f - d / 1.8f);
-                                g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
-                                if (kz - 0.25f < g_fire_z[py][px]) g_fire_z[py][px] = kz - 0.25f;
+        // Update sword blade thermal state
+        for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
+            float s = 8.0f * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
+            if (!g_bonfire_lit) {
+                g_sword.blade_segs[i].heat = 0.0f;
+            } else if (g_ignition_timer > 0.0f && g_ignition_timer < 2.0f) {
+                float climb = (g_ignition_timer / 2.0f) * 8.0f;
+                g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (climb - s + 1.0f) / 1.8f));
+            } else {
+                g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f));
+            }
+        }
+
+        if (g_bonfire_lit) {
+            // Base mound glowing ember core - compact hot heart at sword entry
+            for (float r = 0.0f; r <= 0.95f; r += 0.22f) {
+                for (float a = 0.0f; a < 6.28f; a += 0.85f) {
+                    Vec3 p_emb = (Vec3){ r * cosf(a) + 0.04f, -2.80f, r * sinf(a) - 0.04f };
+                    Vec3 rel_k = vec3_sub(p_emb, cam_pos);
+                    int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
+                    int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
+                    float kz = vec3_dot(rel_k, fwd);
+                    float val = 0.96f * (1.0f - r / 1.15f);
+                    for (int dy = -1; dy <= 1; dy++) {
+                        for (int dx = -1; dx <= 1; dx++) {
+                            int px = kx + dx, py = ky + dy;
+                            if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                                float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.5f);
+                                if (d < 1.8f) {
+                                    float h = val * (1.0f - d / 1.8f);
+                                    g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
+                                    if (kz - 0.25f < g_fire_z[py][px]) g_fire_z[py][px] = kz - 0.25f;
+                                }
                             }
                         }
                     }
                 }
             }
-        }
 
-        // Helical wrapping flame ribbons climbing the coiled blade all the way to the crossguard
-        Vec3 u = g_sword.axis;
-        Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
-        Vec3 w2 = vec3_cross(u, w1);
-        float flame_reach = 7.6f; // reaches up to quillon & guard
+            // Helical wrapping flame ribbons climbing the coiled blade all the way to the crossguard
+            Vec3 u = g_sword.axis;
+            Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
+            Vec3 w2 = vec3_cross(u, w1);
+            float flame_reach = 7.6f; // reaches up to quillon & guard
 
-        for (float s = 0.06f; s <= flame_reach; s += 0.08f) {
-            float t_norm = s / flame_reach;
-            float base_heat = (0.95f - t_norm * 0.40f);
-            float spiral_r = 0.32f * (1.0f - t_norm * 0.15f);
+            for (float s = 0.06f; s <= flame_reach; s += 0.08f) {
+                float t_norm = s / flame_reach;
+                float base_heat = (0.95f - t_norm * 0.40f);
+                float spiral_r = 0.32f * (1.0f - t_norm * 0.15f);
 
-            // Two intertwined spiraling ribbons hugging the blade twists
-            for (int t = 0; t < 2; t++) {
-                float phase = s * 2.6f + g_anim_time * 6.5f + (t * 3.14159f);
-                Vec3 radial_disp = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)),
-                                            vec3_scale(w2, spiral_r * cosf(phase)));
-                Vec3 p_tongue = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), radial_disp));
-                Vec3 rel = vec3_sub(p_tongue, cam_pos);
-                int kx = (int)(((vec3_dot(rel, right) / world_w) + 0.5f) * g_pixel_w);
-                int ky = (int)((0.5f - (vec3_dot(rel, up) / world_h)) * g_pixel_h);
-                float kz = vec3_dot(rel, fwd);
+                // Two intertwined spiraling ribbons hugging the blade twists
+                for (int t = 0; t < 2; t++) {
+                    float phase = s * 2.6f + g_anim_time * 6.5f + (t * 3.14159f);
+                    Vec3 radial_disp = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)),
+                                                vec3_scale(w2, spiral_r * cosf(phase)));
+                    Vec3 p_tongue = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u, s), radial_disp));
+                    Vec3 rel = vec3_sub(p_tongue, cam_pos);
+                    int kx = (int)(((vec3_dot(rel, right) / world_w) + 0.5f) * g_pixel_w);
+                    int ky = (int)((0.5f - (vec3_dot(rel, up) / world_h)) * g_pixel_h);
+                    float kz = vec3_dot(rel, fwd);
 
-                float flicker = 0.88f + 0.22f * sinf(g_anim_time * 12.0f + s * 3.5f + t * 2.5f);
-                float val = fminf(1.0f, base_heat * flicker * 1.10f);
+                    float flicker = 0.88f + 0.22f * sinf(g_anim_time * 12.0f + s * 3.5f + t * 2.5f);
+                    float val = fminf(1.0f, base_heat * flicker * 1.10f);
 
-                int rad = (t_norm < 0.25f) ? 2 : 1;
+                    int rad = (t_norm < 0.25f) ? 2 : 1;
 
-                // Flame depth relative to camera
-                float f_depth = kz + (radial_disp.z < 0.0f ? -0.22f : 0.22f);
+                    // Flame depth relative to camera
+                    float f_depth = kz + (radial_disp.z < 0.0f ? -0.22f : 0.22f);
 
-                for (int dy = -rad; dy <= rad; dy++) {
-                    for (int dx = -rad; dx <= rad; dx++) {
-                        int px = kx + dx, py = ky + dy;
-                        if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
-                            float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.4f);
-                            if (d <= (float)rad) {
-                                float h = val * (1.0f - d / ((float)rad + 0.4f));
-                                g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
-                                if (f_depth < g_fire_z[py][px]) g_fire_z[py][px] = f_depth;
+                    for (int dy = -rad; dy <= rad; dy++) {
+                        for (int dx = -rad; dx <= rad; dx++) {
+                            int px = kx + dx, py = ky + dy;
+                            if (px >= 0 && px < g_pixel_w && py >= 0 && py < g_pixel_h) {
+                                float d = sqrtf(dx * dx * 1.0f + dy * dy * 1.4f);
+                                if (d <= (float)rad) {
+                                    float h = val * (1.0f - d / ((float)rad + 0.4f));
+                                    g_fire_heat[py][px] = fmaxf(g_fire_heat[py][px], h);
+                                    if (f_depth < g_fire_z[py][px]) g_fire_z[py][px] = f_depth;
+                                }
                             }
                         }
                     }
@@ -2590,32 +2628,34 @@ static void update_simulation(void) {
 
     // 4. Sparks Ejection from burning wood & Dark Souls Rising Embers
     if (g_is_dark_souls) {
-        // Continuous organic embers rising from the ash mound and climbing up the coiled sword blade
-        if (rand_f() < 0.88f) {
-            float s_ember = rand_f() * 5.8f;
-            Vec3 u_sw = g_sword.axis;
-            Vec3 w1_sw = vec3_norm(vec3_cross(u_sw, (Vec3){0.0f, 0.0f, 1.0f}));
-            Vec3 w2_sw = vec3_cross(u_sw, w1_sw);
-            float a_emb = rand_f() * 6.28f;
-            float r_emb = 0.15f + rand_f() * 0.35f;
-            Vec3 disp = vec3_add(vec3_scale(w1_sw, r_emb * sinf(a_emb)), vec3_scale(w2_sw, r_emb * cosf(a_emb)));
-            Vec3 p_emb = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u_sw, s_ember), disp));
+        if (g_bonfire_lit) {
+            // Continuous organic embers rising from the ash mound and climbing up the coiled sword blade
+            if (rand_f() < 0.88f) {
+                float s_ember = rand_f() * 5.8f;
+                Vec3 u_sw = g_sword.axis;
+                Vec3 w1_sw = vec3_norm(vec3_cross(u_sw, (Vec3){0.0f, 0.0f, 1.0f}));
+                Vec3 w2_sw = vec3_cross(u_sw, w1_sw);
+                float a_emb = rand_f() * 6.28f;
+                float r_emb = 0.15f + rand_f() * 0.35f;
+                Vec3 disp = vec3_add(vec3_scale(w1_sw, r_emb * sinf(a_emb)), vec3_scale(w2_sw, r_emb * cosf(a_emb)));
+                Vec3 p_emb = vec3_add(g_sword.root_pos, vec3_add(vec3_scale(u_sw, s_ember), disp));
 
-            Vec3 v_emb = (Vec3){
-                (rand_f() - 0.5f) * 0.6f + sinf(p_emb.y * 2.0f + g_anim_time * 3.0f) * 0.4f,
-                rand_f() * 2.2f + 1.8f,
-                (rand_f() - 0.5f) * 0.6f
-            };
-            RGB emb_col = (rand_f() > 0.40f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[2];
-            spawn_spark_3d(p_emb, v_emb, rand_range(25, 55), emb_col);
-        }
-        // Base mound hot sparks
-        if (rand_f() < 0.45f) {
-            float r_ash = rand_f() * 1.5f;
-            float a_ash = rand_f() * 6.28f;
-            Vec3 p_ash = (Vec3){ r_ash * cosf(a_ash), -2.65f, r_ash * sinf(a_ash) };
-            Vec3 v_ash = (Vec3){ (rand_f() - 0.5f) * 0.8f, rand_f() * 2.8f + 1.5f, (rand_f() - 0.5f) * 0.8f };
-            spawn_spark_3d(p_ash, v_ash, rand_range(20, 48), PALETTE_EMBERS[rand_range(2, 4)]);
+                Vec3 v_emb = (Vec3){
+                    (rand_f() - 0.5f) * 0.6f + sinf(p_emb.y * 2.0f + g_anim_time * 3.0f) * 0.4f,
+                    rand_f() * 2.2f + 1.8f,
+                    (rand_f() - 0.5f) * 0.6f
+                };
+                RGB emb_col = (rand_f() > 0.40f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[2];
+                spawn_spark_3d(p_emb, v_emb, rand_range(25, 55), emb_col);
+            }
+            // Base mound hot sparks
+            if (rand_f() < 0.45f) {
+                float r_ash = rand_f() * 1.5f;
+                float a_ash = rand_f() * 6.28f;
+                Vec3 p_ash = (Vec3){ r_ash * cosf(a_ash), -2.65f, r_ash * sinf(a_ash) };
+                Vec3 v_ash = (Vec3){ (rand_f() - 0.5f) * 0.8f, rand_f() * 2.8f + 1.5f, (rand_f() - 0.5f) * 0.8f };
+                spawn_spark_3d(p_ash, v_ash, rand_range(20, 48), PALETTE_EMBERS[rand_range(2, 4)]);
+            }
         }
     } else if (g_sim_time < 2900.0f && rand_f() < 0.65f) {
         for (int i = 0; i < g_num_logs; i++) {
@@ -2683,8 +2723,8 @@ static void render_scene(void) {
     }
 
     // Compute Camera Vectors
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 0.70f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 22.0f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.05f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 24.5f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2695,8 +2735,8 @@ static void render_scene(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 16.5f : 22.0f;
-    float world_h = g_is_dark_souls ? 12.2f : 14.0f;
+    float world_w = g_is_dark_souls ? 20.8f : 22.0f;
+    float world_h = g_is_dark_souls ? 15.2f : 14.0f;
 
     // Fire point light positioned in the hearth core with organic flicker
     float fire_activity = fmaxf(g_ash_bed.heat, 0.0f);
@@ -2710,6 +2750,9 @@ static void render_scene(void) {
     float flicker = (1.0f + 0.22f * sinf(g_anim_time * 8.5f + sinf(g_anim_time * 17.0f)) + 0.14f * cosf(g_anim_time * 12.0f)) * fire_activity;
     Vec3 light_pos = (Vec3){0.0f, g_is_dark_souls ? -1.5f : -1.8f, 0.0f};
     float light_intensity = 2.6f * flicker;
+    if (g_is_dark_souls && !g_bonfire_lit) {
+        light_intensity = 0.40f;
+    }
 
     // =========================================================================
     // 1. 3D Raycasting with Stones and Segmented Wood
@@ -2830,18 +2873,26 @@ static void render_scene(void) {
             Vec3 bone_pt = {0,0,0}, bone_norm = {0,1,0};
             float bone_char = 0.0f, bone_heat = 0.0f;
             if (g_is_dark_souls) {
-                for (int i = 0; i < g_num_bones; i++) {
-                    float t, chr, ht;
-                    Vec3 pt, norm;
-                    if (intersect_bone(&g_bones[i], ray_orig, ray_dir, &t, &pt, &norm, &chr, &ht)) {
-                        if (t < closest_t) {
-                            closest_t = t;
-                            bone_pt = pt;
-                            bone_norm = norm;
-                            bone_char = chr;
-                            bone_heat = ht;
-                            hit_bone = &g_bones[i];
-                            hit_type = 7;
+                // Fast bounding sphere test for bone pile (all 32 bones lie inside radius 3.80f)
+                Vec3 b_c = (Vec3){0.0f, -2.85f, -0.10f};
+                Vec3 ro_b = vec3_sub(ray_orig, b_c);
+                float b_dot_d = vec3_dot(ro_b, ray_dir);
+                float c_b = vec3_dot(ro_b, ro_b) - (3.80f * 3.80f);
+                float disc_b = b_dot_d * b_dot_d - c_b;
+                if (disc_b >= 0.0f) {
+                    for (int i = 0; i < g_num_bones; i++) {
+                        float t, chr, ht;
+                        Vec3 pt, norm;
+                        if (intersect_bone(&g_bones[i], ray_orig, ray_dir, &t, &pt, &norm, &chr, &ht)) {
+                            if (t < closest_t) {
+                                closest_t = t;
+                                bone_pt = pt;
+                                bone_norm = norm;
+                                bone_char = chr;
+                                bone_heat = ht;
+                                hit_bone = &g_bones[i];
+                                hit_type = 7;
+                            }
                         }
                     }
                 }
@@ -3116,7 +3167,7 @@ static void render_scene(void) {
                 if (g_is_dark_souls) {
                     if (ash_bed_pt.y > -4.18f) {
                         // On the sacred Ash Mound
-                        if (r_core < 1.35f && ash_bed_pt.y > -3.35f) {
+                        if (r_core < 1.35f && ash_bed_pt.y > -3.35f && g_bonfire_lit) {
                             // Glowing embers and coals at the sword entry core
                             float h_core = fmaxf(0.0f, 1.0f - r_core / 1.35f);
                             int emb_idx = (int)(h_core * 3.8f);
@@ -3354,7 +3405,7 @@ static void render_scene(void) {
                 if (bone_char > 0.85f) {
                     // Deep dark socket void or nasal cavity
                     g_shade_buf[y][x] = PALETTE_BONE[0];
-                } else if (bone_heat > 0.50f) {
+                } else if (bone_heat > 0.50f && g_bonfire_lit) {
                     // Glowing charred bone near embers
                     int emb_idx = (int)(bone_heat * 3.5f);
                     if (emb_idx < 0) emb_idx = 0;
@@ -3681,16 +3732,50 @@ static int format_frame_buffer(char *buf, int buf_cap) {
     int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
     if (g_is_dark_souls) {
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[1;31m[BONFIRE LIT]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [K/F] Avivar [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
-            el_min, el_sec, tot_min, rem_min, rem_sec,
-            g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
-        if (n > 0) buf_len += n;
+        if (!g_bonfire_lit) {
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[1;30m[BONFIRE UNLIT]\033[0m \033[1;37m[E]\033[0m \033[1;38;2;255;215;100mAcender Fogueira (Light Bonfire)\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
+                g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+            if (n > 0) buf_len += n;
+        } else {
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[1;31m[BONFIRE LIT]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [E/K] Avivar [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
+                el_min, el_sec, tot_min, rem_min, rem_sec,
+                g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+            if (n > 0) buf_len += n;
+        }
     } else {
         n = snprintf(buf + buf_len, buf_cap - buf_len,
             "\033[1;33m[Lareira 3D]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [M] Modo [Q] Sair ",
             el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
             g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+        if (n > 0) buf_len += n;
+    }
+
+    // Cinematic Dark Souls banner overlay: "B O N F I R E   L I T"
+    if (g_is_dark_souls && g_banner_timer > 0.0f) {
+        int banner_row = text_rows / 4;
+        if (banner_row < 2) banner_row = 2;
+        const char *title = "B O N F I R E   L I T";
+        int title_len = 21;
+        int banner_w = 44;
+        if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
+        int start_col = (g_pixel_w - banner_w) / 2 + 1;
+        int text_col = (g_pixel_w - title_len) / 2 + 1;
+
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[%d;%dH\033[1;38;2;190;150;70m─ ─ ─── ─────────────────────────────── ─── ─ ─\033[0m",
+            banner_row, start_col);
+        if (n > 0) buf_len += n;
+
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[%d;%dH\033[1;38;2;255;235;150m%s\033[0m",
+            banner_row + 1, text_col, title);
+        if (n > 0) buf_len += n;
+
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[%d;%dH\033[1;38;2;190;150;70m─ ─ ─── ─────────────────────────────── ─── ─ ─\033[0m",
+            banner_row + 2, start_col);
         if (n > 0) buf_len += n;
     }
 
@@ -3704,6 +3789,46 @@ static void present_frame(void) {
     int len = format_frame_buffer(s_present_buf, sizeof(s_present_buf));
     if (len > 0) {
         safe_write(STDOUT_FILENO, s_present_buf, len);
+    }
+}
+
+static void ignite_bonfire(void) {
+    if (g_bonfire_lit) return;
+    g_bonfire_lit = true;
+    g_ignition_timer = 0.01f;
+    g_banner_timer = 4.0f;
+    g_sim_time = 0.0f; // Start pomodoro countdown at the moment of ignition
+
+    // Mini-explosão radial de fagulhas 3D e brasas estilo Dark Souls
+    for (int i = 0; i < 180; i++) {
+        float angle = rand_f() * 2.0f * (float)M_PI;
+        float r = 0.10f + 0.90f * rand_f();
+        Vec3 sp_p = (Vec3){
+            0.04f + r * cosf(angle),
+            -2.85f + rand_f() * 0.95f,
+            -0.04f + r * sinf(angle)
+        };
+        float speed = 2.4f + rand_f() * 5.0f;
+        float v_up = 3.8f + rand_f() * 5.8f;
+        Vec3 sp_v = (Vec3){
+            cosf(angle) * speed,
+            v_up,
+            sinf(angle) * speed
+        };
+        RGB col = (rand_f() > 0.35f) ? PALETTE_EMBERS[4] : PALETTE_EMBERS[3];
+        spawn_spark_3d(sp_p, sp_v, rand_range(35, 75), col);
+    }
+
+    g_ash_bed.heat = 1.0f;
+    for (int y = 0; y < g_pixel_h; y++) {
+        for (int x = 0; x < g_pixel_w; x++) {
+            int cx = g_pixel_w / 2;
+            int cy = (int)(g_pixel_h * 0.72f);
+            int dx = x - cx, dy = y - cy;
+            if (dx*dx + dy*dy < 140) {
+                g_fire_heat[y][x] = 0.95f;
+            }
+        }
     }
 }
 
@@ -3750,10 +3875,35 @@ static void handle_input(void) {
         } else if (ch == 's' || ch == 'S' || ch == 'j') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+        } else if (ch == 'e' || ch == 'E') {
+            if (g_is_dark_souls) {
+                if (!g_bonfire_lit) {
+                    ignite_bonfire();
+                } else {
+                    for (int sp = 0; sp < 55; sp++) {
+                        Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
+                        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
+                        spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+                    }
+                }
+            }
+        } else if (ch == '\n' || ch == '\r') {
+            if (g_is_dark_souls && !g_bonfire_lit) {
+                ignite_bonfire();
+            }
         } else if (ch == 'g' || ch == 'G' || ch == 't' || ch == 'T' || ch == ' ') {
-            g_auto_turntable = !g_auto_turntable;
+            if (ch == ' ' && g_is_dark_souls && !g_bonfire_lit) {
+                ignite_bonfire();
+            } else {
+                g_auto_turntable = !g_auto_turntable;
+            }
         } else if (ch == 'm' || ch == 'M') {
             g_is_dark_souls = !g_is_dark_souls;
+            if (g_is_dark_souls) {
+                g_bonfire_lit = false;
+                g_banner_timer = 0.0f;
+                g_ignition_timer = 0.0f;
+            }
             init_scene();
         } else if (ch == 'f' || ch == 'F') {
             if (!g_is_dark_souls) {
@@ -3766,6 +3916,11 @@ static void handle_input(void) {
                 }
             }
         } else if (ch == 'r' || ch == 'R') {
+            if (g_is_dark_souls) {
+                g_bonfire_lit = false;
+                g_banner_timer = 0.0f;
+                g_ignition_timer = 0.0f;
+            }
             init_scene();
         } else if (ch == 'q' || ch == 'Q') {
             g_running = 0;
@@ -3809,6 +3964,7 @@ typedef struct {
 static BenchmarkResult benchmark_pipeline(const char *scenario_name, bool ds_mode, int w, int h, int num_frames) {
     static char s_bench_buf[524288];
     g_is_dark_souls = ds_mode;
+    g_bonfire_lit = true;
     g_pixel_w = w;
     g_pixel_h = h;
     init_scene();
@@ -3929,6 +4085,7 @@ int main(int argc, char **argv) {
 
     bool do_benchmark = false;
     int benchmark_frames = 200;
+    bool force_unlit = false;
 
     const char *snapshot_out = NULL;
     float snapshot_sim = 0.0f;
@@ -3952,6 +4109,10 @@ int main(int argc, char **argv) {
             }
         } else if (strcmp(argv[i], "--souls") == 0 || strcmp(argv[i], "--ds") == 0 || strcmp(argv[i], "--darksouls") == 0) {
             g_is_dark_souls = true;
+            g_bonfire_lit = false;
+        } else if (strcmp(argv[i], "--unlit") == 0) {
+            force_unlit = true;
+            g_bonfire_lit = false;
         } else if (strcmp(argv[i], "--snapshot") == 0 && i + 1 < argc) {
             do_snapshot = true;
             snapshot_out = argv[++i];
@@ -3995,6 +4156,7 @@ int main(int argc, char **argv) {
     if (do_snapshot && snapshot_out != NULL) {
         g_pixel_w = 120;
         g_pixel_h = 70;
+        g_bonfire_lit = !force_unlit;
         init_scene();
         g_cam_yaw = snapshot_yaw * (float)M_PI / 180.0f;
         g_cam_pitch = snapshot_pitch * (float)M_PI / 180.0f;
@@ -4021,6 +4183,7 @@ int main(int argc, char **argv) {
     if (do_turntable) {
         g_pixel_w = 120;
         g_pixel_h = 70;
+        g_bonfire_lit = true;
         init_scene();
         g_time_scale = 30.0f;
         while (g_sim_time < turntable_sim) {
