@@ -967,7 +967,7 @@ static void build_dark_souls_scene(void) {
     Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
     Vec3 w2 = vec3_cross(u, w1);
 
-    float blade_len = 8.0f;
+    float blade_len = 7.6f;
     Vec3 prev_p = g_sword.root_pos;
     for (int i = 0; i < NUM_SWORD_BLADE_SEGS; i++) {
         float s = blade_len * (float)(i + 1) / (float)NUM_SWORD_BLADE_SEGS;
@@ -995,8 +995,9 @@ static void build_dark_souls_scene(void) {
     g_sword.quillon_p1 = vec3_add(g_sword.guard_p1, vec3_add(vec3_scale(u, -0.45f), vec3_scale(w1, -0.22f)));
     g_sword.quillon_p2 = vec3_add(g_sword.guard_p2, vec3_add(vec3_scale(u, -0.45f), vec3_scale(w1, 0.22f)));
 
-    g_sword.pommel_pos = vec3_add(g_sword.guard_pos, vec3_scale(u, 1.45f));
-    g_sword.pommel_tip = vec3_add(g_sword.pommel_pos, vec3_scale(u, 0.45f));
+    // Long authentic 2-handed greatsword hilt / grip and crown pommel
+    g_sword.pommel_pos = vec3_add(g_sword.guard_pos, vec3_scale(u, 2.75f));
+    g_sword.pommel_tip = vec3_add(g_sword.pommel_pos, vec3_scale(u, 0.55f));
 
     // 3. Charred Bonfire Logs/Branches (Galhos carbonizados salientes)
     g_num_logs = 4;
@@ -2435,8 +2436,8 @@ static void update_simulation(void) {
     // -------------------------------------------------------------------------
     // STRICT FIRE PROJECTION: Heat originates strictly from burning wood & kindling
     // -------------------------------------------------------------------------
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.05f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 24.5f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.25f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 25.2f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2447,8 +2448,8 @@ static void update_simulation(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 20.8f : 22.0f;
-    float world_h = g_is_dark_souls ? 15.2f : 14.0f;
+    float world_w = g_is_dark_souls ? 21.6f : 22.0f;
+    float world_h = g_is_dark_souls ? 16.2f : 14.0f;
 
     // Reset next fire frame and depth buffer
     memset(g_next_fire, 0, sizeof(g_next_fire));
@@ -2756,8 +2757,8 @@ static void render_scene(void) {
     }
 
     // Compute Camera Vectors
-    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.05f : -1.2f, 0.0f};
-    float cam_dist = g_is_dark_souls ? 24.5f : 28.0f;
+    Vec3 target = (Vec3){0.0f, g_is_dark_souls ? 1.25f : -1.2f, 0.0f};
+    float cam_dist = g_is_dark_souls ? 25.2f : 28.0f;
     Vec3 cam_pos = (Vec3){
         cam_dist * cosf(g_cam_pitch) * sinf(g_cam_yaw),
         target.y + cam_dist * sinf(g_cam_pitch),
@@ -2768,8 +2769,8 @@ static void render_scene(void) {
     Vec3 right = vec3_norm(vec3_cross(fwd, up_w));
     Vec3 up = vec3_cross(right, fwd);
 
-    float world_w = g_is_dark_souls ? 20.8f : 22.0f;
-    float world_h = g_is_dark_souls ? 15.2f : 14.0f;
+    float world_w = g_is_dark_souls ? 21.6f : 22.0f;
+    float world_h = g_is_dark_souls ? 16.2f : 14.0f;
 
     // Fire point light positioned in the hearth core with organic flicker
     float fire_activity = fmaxf(g_ash_bed.heat, 0.0f);
