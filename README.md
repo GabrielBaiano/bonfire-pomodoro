@@ -48,21 +48,27 @@ make
 
 | Key | Action |
 | --- | --- |
+| `[E]` / `Space` | Kindle bonfire (when unlit/extinguished) or stoke sparks |
+| `[P]` | Pause / resume current Pomodoro phase |
+| `[S]` | Skip phase (Focus → Rest → Next Focus) |
+| `[M]` | Mute / unmute audio |
+| `[` / `]` or `-` / `+` | Decrease / increase sound volume (10% steps) |
 | `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
 | `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
-| `Space` or `g` or `t` | Toggle automatic 360° turntable rotation |
-| `m` | Switch mode (Standard Fireplace ↔ Dark Souls Coiled Sword) |
-| `k` / `f` | Stoke fire (wood in campfire / kindle surge in Dark Souls) |
-| `r` | Rekindle / restart bonfire session |
+| `Space` or `g` or `t` | Toggle automatic 360° turntable rotation (in classic mode) |
+| `r` | Rekindle / restart session from unlit state |
 | `q` | Quit session |
 
 ## Features & Simulation Details
 
-- **3D Stone Hearth**: 16 ellipsoidal fieldstones with perimeter contact forming a natural ring.
+- **Startup Setup Menu**: Interactive pre-launch TUI to pick Fireplace style, focus duration, short/long breaks, cycles, and volume. Settings auto-persist to `~/.fireplace_conf`.
+- **Authentic Audio Engine**: Seamless raw PCM streaming via PipeWire/ALSA with zero frame drops. Includes authentic Dark Souls bonfire ignition & loop (filtered of background choir hum) and realistic wood crackle.
+- **3D Stone Hearth & Coiled Sword**: Procedural helical geometry and skull bone mound rendered with per-object shaders.
 - **Ragdoll Wood Physics**: Burning logs snap unevenly when central mass is exhausted and drop onto the hearth floor with physical impulse and bounce restitution.
-- **Smart Stoking (`f`)**: Accepts new firewood into natural open gaps in the teepee cone with fire capacity limits.
 - **Turntable & Snapshot Exporter**: Headless rendering to PPM/GIF for captures (`--snapshot` and `--turntable`).
 
-## Documentation
+## Documentation & Engineering Blog
 
-See [docs/architecture.md](docs/architecture.md) for technical notes on the raycast shader, combustion equations, and geometry pipeline.
+- 📖 **[BLOG_POST.md](BLOG_POST.md)**: An in-depth technical write-up (in the style of [Simon Willison's weblog](https://simonwillison.net/)) breaking down the 3D raymarching math, G-buffer cel-shading outlines, cellular automata fire convection, ANSI half-block sub-pixels, and raw PCM streaming audio architecture.
+- 📐 **[docs/architecture.md](docs/architecture.md)**: Deep technical notes on the raycast shader, combustion equations, and geometry pipeline.
+
