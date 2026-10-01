@@ -403,14 +403,38 @@ static SmokeParticle g_smoke[MAX_SMOKE];
 static Cylinder3D g_logs[MAX_LOGS];
 static int g_num_logs = 5;
 
+typedef enum {
+    FIRE_STATE_UNLIT = 0,
+    FIRE_STATE_LIT_FOCUS = 1,
+    FIRE_STATE_SMOLDERING_REST = 2,
+    FIRE_STATE_EXTINGUISHED = 3
+} FireState;
+
+typedef enum {
+    BANNER_NONE = 0,
+    BANNER_LIT = 1,
+    BANNER_REST = 2,
+    BANNER_EXTINGUISHED = 3
+} BannerType;
+
 // Dark Souls Coiled Sword (Espada Espiral) & Bone Pile
 static bool g_is_dark_souls = false;
-static bool g_bonfire_lit = true;
+static FireState g_fire_state = FIRE_STATE_UNLIT;
+static BannerType g_banner_type = BANNER_NONE;
+static bool g_bonfire_lit = false;
 static float g_ignition_timer = 0.0f;
 static float g_banner_timer = 0.0f;
 static Sword3D g_sword;
 static Bone3D g_bones[MAX_BONES];
 static int g_num_bones = 0;
+
+// Pomodoro Focus & Rest cycle management
+static float g_focus_duration = 1500.0f; // 25 min default
+static float g_rest_duration = 300.0f;   // 5 min rest tolerance
+static float g_pomodoro_elapsed = 0.0f;  // Seconds elapsed in current state
+static int g_pomodoro_cycles_done = 0;   // Completed focus cycles
+static bool g_pomodoro_paused = false;
+static float g_auto_wood_check_timer = 0.0f;
 
 // 3D Kindling Twigs & Dry Leaves (Gravetos e Folhas)
 static Twig3D g_twigs[MAX_TWIGS];
@@ -430,7 +454,7 @@ static bool g_auto_turntable = false; // Auto 360 degree turntable rotation
 // Simulation dynamics (Physically dimensionalized in real seconds)
 static float g_sim_time = 0.0f;       // Physical simulated time in seconds
 static float g_anim_time = 0.0f;      // Display animation time (flicker, ash drift)
-static float g_cycle_duration = 5400.0f; // 90 min (1h30m) real fireplace duration by default
+static float g_cycle_duration = 1500.0f; // Sync with focus duration (25 min default)
 static bool g_cycle_logged = false;   // Prevents duplicate history logging
 static float g_time_scale = 1.0f;     // 1.0 = Realtime, 30.0 = Fast Demo
 static bool g_realtime_mode = true;   // Realtime 1.0x vs Fast Demo 30.0x
@@ -1126,10 +1150,11 @@ static void init_scene(void) {
     memset(g_ash_flakes, 0, sizeof(g_ash_flakes));
     memset(g_smoke, 0, sizeof(g_smoke));
 
+    g_bonfire_lit = (g_fire_state == FIRE_STATE_LIT_FOCUS || g_fire_state == FIRE_STATE_SMOLDERING_REST);
     g_ash_bed.center = (Vec3){0.0f, -4.2f, 0.0f};
     g_ash_bed.radius_xz = 4.8f;
     g_ash_bed.height = 0.35f;
-    g_ash_bed.heat = 0.35f;
+    g_ash_bed.heat = g_bonfire_lit ? (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 0.35f : 1.0f) : 0.0f;
     g_ash_bed.volume = 0.0f;
     g_burnt_mass = 0.0f;
 
@@ -1809,11 +1834,65 @@ static bool stoke_fire_add_wood(void) {
 }
 
 static void update_simulation(void) {
+    float real_dt = 0.025f * g_time_scale;
+
+    // Pomodoro lifecycle progression
+    if (!g_pomodoro_paused) {
+        if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+            g_pomodoro_elapsed += real_dt;
+            if (g_pomodoro_elapsed >= g_focus_duration) {
+                // Focus time ended -> Enter Smoldering Rest (brasa curta)
+                g_fire_state = FIRE_STATE_SMOLDERING_REST;
+                g_pomodoro_elapsed = 0.0f;
+                g_pomodoro_cycles_done++;
+                g_banner_type = BANNER_REST;
+                g_banner_timer = 4.0f;
+                if (!g_cycle_logged) {
+                    g_cycle_logged = true;
+                    int target_min = (int)(g_focus_duration / 60.0f);
+                    char mode_desc[64];
+                    if (g_is_dark_souls) {
+                        snprintf(mode_desc, sizeof(mode_desc), "Dark Souls Bonfire (Ciclo %02d)", g_pomodoro_cycles_done);
+                    } else {
+                        snprintf(mode_desc, sizeof(mode_desc), "Tenda %s (Ciclo %02d)", WOOD_SPECIES[g_wood_type].name, g_pomodoro_cycles_done);
+                    }
+                    log_bonfire_history(target_min, target_min, mode_desc, true);
+                }
+            }
+        } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+            g_pomodoro_elapsed += real_dt;
+            if (g_pomodoro_elapsed >= g_rest_duration) {
+                // User neglected to stoke/rekindle embers in time -> Fire dies completely!
+                g_fire_state = FIRE_STATE_EXTINGUISHED;
+                g_bonfire_lit = false;
+                g_ash_bed.heat = 0.0f;
+                g_banner_type = BANNER_EXTINGUISHED;
+                g_banner_timer = 4.5f;
+            }
+        }
+    }
+
+    // Auto-replenish wood during active focus in standard fireplace mode
+    if (!g_is_dark_souls && g_fire_state == FIRE_STATE_LIT_FOCUS && !g_pomodoro_paused) {
+        g_auto_wood_check_timer += real_dt;
+        if (g_auto_wood_check_timer >= 2.0f) {
+            g_auto_wood_check_timer = 0.0f;
+            float total_wood_mass = 0.0f;
+            for (int i = 0; i < g_num_logs; i++) {
+                total_wood_mass += g_logs[i].segments[4].structural_mass;
+            }
+            float rem_focus = fmaxf(0.0f, g_focus_duration - g_pomodoro_elapsed);
+            if (total_wood_mass < 2.0f && rem_focus > 45.0f) {
+                stoke_fire_add_wood();
+            }
+        }
+    }
+
     // Physical time dimensionalization:
-    // Full lifecycle (0 to 3000s) maps directly to g_cycle_duration real seconds
-    float rate_mult = (g_cycle_duration > 0.0f) ? (3000.0f / g_cycle_duration) : 1.0f;
+    // Full lifecycle (0 to 3000s) maps directly to g_focus_duration real seconds
+    float rate_mult = (g_focus_duration > 0.0f) ? (3000.0f / g_focus_duration) : 1.0f;
     float dt = 0.025f * g_time_scale * rate_mult;
-    if (!g_is_dark_souls || g_bonfire_lit) {
+    if (g_fire_state == FIRE_STATE_LIT_FOCUS || g_fire_state == FIRE_STATE_SMOLDERING_REST) {
         g_sim_time += dt;
     }
     g_anim_time += 0.025f;
@@ -2111,13 +2190,6 @@ static void update_simulation(void) {
         }
         if (cur_sim_t >= 3000.0f) {
             g_ash_bed.heat = 0.0f;
-            if (!g_cycle_logged) {
-                g_cycle_logged = true;
-                int target_min = (int)(g_cycle_duration / 60.0f);
-                char mode_desc[64];
-                snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
-                log_bonfire_history(target_min, target_min, mode_desc, true);
-            }
         }
 
         // ---------------------------------------------------------------------
@@ -2362,8 +2434,14 @@ static void update_simulation(void) {
     }
 
     if (g_is_dark_souls && g_sword.active) {
-        // Sustain constant mystical bonfire flame activity
-        g_ash_bed.heat = 1.0f;
+        // Sustain bonfire flame activity based on state
+        if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+            g_ash_bed.heat = 0.35f;
+        } else if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+            g_ash_bed.heat = 1.0f;
+        } else {
+            g_ash_bed.heat = 0.0f;
+        }
 
         // Update blade heat along the taller twisted blade
         float blade_len = 8.0f;
@@ -2378,8 +2456,8 @@ static void update_simulation(void) {
         Vec3 w2 = vec3_cross(u, w1);
 
         for (int e = 0; e < 3; e++) {
-            if (rand_f() < 0.75f) {
-                float s = rand_f() * 7.4f;
+            if (rand_f() < (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 0.30f : 0.75f)) {
+                float s = rand_f() * (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 2.5f : 7.4f);
                 float phase = s * 2.4f + g_anim_time * 6.0f + (float)e * 2.1f;
                 float spiral_r = 0.38f * (1.0f - 0.12f * (s / 7.4f));
                 Vec3 offset = vec3_add(vec3_scale(w1, spiral_r * sinf(phase)), vec3_scale(w2, spiral_r * cosf(phase)));
@@ -2468,6 +2546,8 @@ static void update_simulation(void) {
             } else if (g_ignition_timer > 0.0f && g_ignition_timer < 2.0f) {
                 float climb = (g_ignition_timer / 2.0f) * 8.0f;
                 g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (climb - s + 1.0f) / 1.8f));
+            } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(0.40f, (2.6f - s) / 2.2f));
             } else {
                 g_sword.blade_segs[i].heat = fmaxf(0.0f, fminf(1.0f, (6.6f - s) / 5.2f));
             }
@@ -2482,7 +2562,7 @@ static void update_simulation(void) {
                     int kx = (int)(((vec3_dot(rel_k, right) / world_w) + 0.5f) * g_pixel_w);
                     int ky = (int)((0.5f - (vec3_dot(rel_k, up) / world_h)) * g_pixel_h);
                     float kz = vec3_dot(rel_k, fwd);
-                    float val = 0.96f * (1.0f - r / 1.15f);
+                    float val = (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 0.45f : 0.96f) * (1.0f - r / 1.15f);
                     for (int dy = -1; dy <= 1; dy++) {
                         for (int dx = -1; dx <= 1; dx++) {
                             int px = kx + dx, py = ky + dy;
@@ -2503,7 +2583,7 @@ static void update_simulation(void) {
             Vec3 u = g_sword.axis;
             Vec3 w1 = vec3_norm(vec3_cross(u, (Vec3){0.0f, 0.0f, 1.0f}));
             Vec3 w2 = vec3_cross(u, w1);
-            float flame_reach = 7.6f; // reaches up to quillon & guard
+            float flame_reach = (g_fire_state == FIRE_STATE_SMOLDERING_REST) ? 2.2f : 7.6f;
 
             for (float s = 0.06f; s <= flame_reach; s += 0.08f) {
                 float t_norm = s / flame_reach;
@@ -2660,12 +2740,12 @@ static void update_simulation(void) {
         }
     }
 
-    // 4. Sparks Ejection from burning wood & Dark Souls Rising Embers
     if (g_is_dark_souls) {
         if (g_bonfire_lit) {
+            float ember_prob = (g_fire_state == FIRE_STATE_SMOLDERING_REST) ? 0.35f : 0.88f;
             // Continuous organic embers rising from the ash mound and climbing up the coiled sword blade
-            if (rand_f() < 0.88f) {
-                float s_ember = rand_f() * 5.8f;
+            if (rand_f() < ember_prob) {
+                float s_ember = rand_f() * (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 2.5f : 5.8f);
                 Vec3 u_sw = g_sword.axis;
                 Vec3 w1_sw = vec3_norm(vec3_cross(u_sw, (Vec3){0.0f, 0.0f, 1.0f}));
                 Vec3 w2_sw = vec3_cross(u_sw, w1_sw);
@@ -2676,22 +2756,23 @@ static void update_simulation(void) {
 
                 Vec3 v_emb = (Vec3){
                     (rand_f() - 0.5f) * 0.6f + sinf(p_emb.y * 2.0f + g_anim_time * 3.0f) * 0.4f,
-                    rand_f() * 2.2f + 1.8f,
+                    rand_f() * (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 1.4f : 2.2f) + 1.2f,
                     (rand_f() - 0.5f) * 0.6f
                 };
                 RGB emb_col = (rand_f() > 0.40f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[2];
-                spawn_spark_3d(p_emb, v_emb, rand_range(25, 55), emb_col);
+                spawn_spark_3d(p_emb, v_emb, rand_range(20, 45), emb_col);
             }
             // Base mound hot sparks
-            if (rand_f() < 0.45f) {
+            float mound_prob = (g_fire_state == FIRE_STATE_SMOLDERING_REST) ? 0.15f : 0.45f;
+            if (rand_f() < mound_prob) {
                 float r_ash = rand_f() * 1.5f;
                 float a_ash = rand_f() * 6.28f;
                 Vec3 p_ash = (Vec3){ r_ash * cosf(a_ash), -2.65f, r_ash * sinf(a_ash) };
-                Vec3 v_ash = (Vec3){ (rand_f() - 0.5f) * 0.8f, rand_f() * 2.8f + 1.5f, (rand_f() - 0.5f) * 0.8f };
-                spawn_spark_3d(p_ash, v_ash, rand_range(20, 48), PALETTE_EMBERS[rand_range(2, 4)]);
+                Vec3 v_ash = (Vec3){ (rand_f() - 0.5f) * 0.8f, rand_f() * 2.2f + 1.2f, (rand_f() - 0.5f) * 0.8f };
+                spawn_spark_3d(p_ash, v_ash, rand_range(18, 40), PALETTE_EMBERS[rand_range(2, 4)]);
             }
         }
-    } else if (g_sim_time < 2900.0f && rand_f() < 0.65f) {
+    } else if (g_sim_time < 2900.0f && rand_f() < (g_fire_state == FIRE_STATE_SMOLDERING_REST ? 0.20f : 0.65f)) {
         for (int i = 0; i < g_num_logs; i++) {
             int s = rand_range(0, NUM_LOG_SEGS - 1);
             if (g_logs[i].segments[s].temp > 0.50f) {
@@ -2704,7 +2785,7 @@ static void update_simulation(void) {
         }
     }
 
-    if (g_sim_time >= 3000.0f) {
+    if (g_fire_state == FIRE_STATE_EXTINGUISHED || (!g_is_dark_souls && g_sim_time >= 3000.0f)) {
         memset(g_fire_heat, 0, sizeof(g_fire_heat));
         for (int i = 0; i < MAX_SPARKS; i++) g_sparks[i].active = false;
     }
@@ -3758,37 +3839,121 @@ static int format_frame_buffer(char *buf, int buf_cap) {
         prev_bg_transp = true;
     }
 
-    float elapsed_sec = fminf(g_cycle_duration, g_sim_time * (g_cycle_duration / 3000.0f));
-    int el_min = (int)(elapsed_sec / 60.0f);
-    int el_sec = (int)fmodf(elapsed_sec, 60.0f);
-    int tot_min = (int)(g_cycle_duration / 60.0f);
-    float rem_sec_total = fmaxf(0.0f, g_cycle_duration - elapsed_sec);
+    // -------------------------------------------------------------------------
+    // TOP AESTHETIC POMODORO HUD (Dark Souls themed)
+    // -------------------------------------------------------------------------
+    if (g_pixel_w >= 65 && text_rows >= 6) {
+        char hud_buf[256];
+        int hud_len = 0;
+
+        if (g_fire_state == FIRE_STATE_UNLIT) {
+            hud_len = snprintf(hud_buf, sizeof(hud_buf),
+                "\033[1;30m[ FOGUEIRA APAGADA ]\033[0m  \033[1;38;2;220;180;90mFoco: %02d:00\033[0m  |  \033[1;37m[E / Espaço]\033[0m \033[38;2;255;215;100mAcender Fogueira\033[0m",
+                (int)(g_focus_duration / 60.0f));
+        } else if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+            float el_foc = fminf(g_focus_duration, g_pomodoro_elapsed);
+            float rem_foc = fmaxf(0.0f, g_focus_duration - el_foc);
+            int e_m = (int)(el_foc / 60.0f), e_s = (int)fmodf(el_foc, 60.0f);
+            int t_m = (int)(g_focus_duration / 60.0f), t_s = (int)fmodf(g_focus_duration, 60.0f);
+            int r_m = (int)(rem_foc / 60.0f), r_s = (int)fmodf(rem_foc, 60.0f);
+
+            float pct = (g_focus_duration > 0.0f) ? (el_foc / g_focus_duration) : 0.0f;
+            int bar_w = 16;
+            int filled = (int)(pct * bar_w);
+            if (filled > bar_w) filled = bar_w;
+
+            char bar[64];
+            int bpos = 0;
+            for (int b = 0; b < filled; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "█");
+            for (int b = filled; b < bar_w; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "░");
+
+            hud_len = snprintf(hud_buf, sizeof(hud_buf),
+                "\033[1;38;2;255;160;40mFOCO [%02d]\033[0m  \033[1;31m🔥\033[0m \033[1;37m%02d:%02d / %02d:%02d\033[0m  \033[38;2;255;190;60m[%s]\033[0m \033[1;33m%2d%%\033[0m  \033[38;2;180;180;180m(Resta %02d:%02d)\033[0m%s",
+                g_pomodoro_cycles_done + 1, e_m, e_s, t_m, t_s, bar, (int)(pct * 100.0f), r_m, r_s,
+                g_pomodoro_paused ? "  \033[1;33m[PAUSADO]\033[0m" : "");
+        } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+            float el_rst = fminf(g_rest_duration, g_pomodoro_elapsed);
+            float rem_rst = fmaxf(0.0f, g_rest_duration - el_rst);
+            int r_m = (int)(rem_rst / 60.0f), r_s = (int)fmodf(rem_rst, 60.0f);
+            float pct = (g_rest_duration > 0.0f) ? (1.0f - el_rst / g_rest_duration) : 0.0f;
+            int bar_w = 14;
+            int filled = (int)(pct * bar_w);
+            if (filled > bar_w) filled = bar_w;
+
+            char bar[64];
+            int bpos = 0;
+            for (int b = 0; b < filled; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "█");
+            for (int b = filled; b < bar_w; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "░");
+
+            hud_len = snprintf(hud_buf, sizeof(hud_buf),
+                "\033[1;38;2;255;110;30mDESCANSO / BRASA CURTA\033[0m  \033[1;33m⏳ %02d:%02d\033[0m  \033[38;2;200;120;40m[%s]\033[0m  \033[1;37m[E / K]\033[0m \033[1;38;2;255;215;100mCutucar Brasa para Reacender\033[0m",
+                r_m, r_s, bar);
+        } else {
+            hud_len = snprintf(hud_buf, sizeof(hud_buf),
+                "\033[1;30m[ FOGUEIRA EXTINTA / CINZAS FRIAS ]\033[0m  \033[1;37m[E / Espaço]\033[0m \033[38;2;255;215;100mReacender Novo Ciclo\033[0m");
+        }
+
+        if (hud_len > 0) {
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[1;4H\033[48;2;14;10;8m %s \033[0m", hud_buf);
+            if (n > 0) buf_len += n;
+        }
+    }
+
+    // -------------------------------------------------------------------------
+    // BOTTOM STATUS FOOTER LINE
+    // -------------------------------------------------------------------------
+    float el_focus_sec = fminf(g_focus_duration, g_pomodoro_elapsed);
+    int el_min = (int)(el_focus_sec / 60.0f);
+    int el_sec = (int)fmodf(el_focus_sec, 60.0f);
+    int tot_min = (int)(g_focus_duration / 60.0f);
+    float rem_sec_total = fmaxf(0.0f, g_focus_duration - el_focus_sec);
     int rem_min = (int)(rem_sec_total / 60.0f);
     int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
 
-    if (g_is_dark_souls) {
-        if (!g_bonfire_lit) {
+    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[%d;1H", text_rows);
+    if (n > 0) buf_len += n;
+
+    if (g_fire_state == FIRE_STATE_UNLIT) {
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[1;30m[APAGADA]\033[0m \033[1;37m[E/Espaço]\033[0m \033[1;38;2;255;215;100mAcender Fogueira\033[0m | [+/-] %02dmin [Tab] Presets [P] Pausar | Giro: %s | [←/→] Girar [M] Modo [Q] Sair ",
+            tot_min, g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+        if (n > 0) buf_len += n;
+    } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+        float rem_rst = fmaxf(0.0f, g_rest_duration - g_pomodoro_elapsed);
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[1;38;2;255;110;30m[BRASA CURTA]\033[0m \033[1;37m[E/K]\033[0m \033[1;38;2;255;215;100mCutucar Brasa / Reacender\033[0m (Apaga em: \033[1;33m%02d:%02d\033[0m) | [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
+            (int)(rem_rst / 60.0f), (int)fmodf(rem_rst, 60.0f), tot_min);
+        if (n > 0) buf_len += n;
+    } else if (g_fire_state == FIRE_STATE_EXTINGUISHED) {
+        n = snprintf(buf + buf_len, buf_cap - buf_len,
+            "\033[1;31m[EXTINTA]\033[0m \033[1;37m[E/Espaço]\033[0m \033[1;38;2;255;215;100mReacender\033[0m | Fogueira morreu por falta de cutucar | [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
+            tot_min);
+        if (n > 0) buf_len += n;
+    } else {
+        // Active LIT FOCUS
+        if (g_is_dark_souls) {
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[1;30m[BONFIRE UNLIT]\033[0m \033[1;37m[E]\033[0m \033[1;38;2;255;215;100mAcender Fogueira (Light Bonfire)\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
-                g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+                "\033[1;31m[BONFIRE LIT]\033[0m Foco: \033[1;37m%02d:%02d / %02d:00\033[0m (Resta %02d:%02d)%s | [E/K] Avivar [P] %s [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
+                el_min, el_sec, tot_min, rem_min, rem_sec,
+                g_pomodoro_paused ? " \033[1;33m[PAUSA]\033[0m" : "",
+                g_pomodoro_paused ? "Retomar" : "Pausar", tot_min);
             if (n > 0) buf_len += n;
         } else {
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[1;31m[BONFIRE LIT]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Giro: %s | [E/K] Avivar [←/→] Girar [G/Espaço] Giro Auto [M] Modo [Q] Sair ",
+                "\033[1;33m[Lareira 3D]\033[0m Foco: \033[1;37m%02d:%02d / %02d:00\033[0m (Resta %02d:%02d)%s | Madeira: \033[1;36m%s\033[0m [F] Lenha [P] %s [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
                 el_min, el_sec, tot_min, rem_min, rem_sec,
-                g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
+                g_pomodoro_paused ? " \033[1;33m[PAUSA]\033[0m" : "",
+                WOOD_SPECIES[g_wood_type].name,
+                g_pomodoro_paused ? "Retomar" : "Pausar", tot_min);
             if (n > 0) buf_len += n;
         }
-    } else {
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[1;33m[Lareira 3D]\033[0m Tempo: \033[1;37m%02d:%02d / %02d:00\033[0m (Restante: %02d:%02d) | Madeira: \033[1;36m%s\033[0m | Giro: %s | [←/→] Girar [G/Espaço] Giro Auto [F] Lenha [M] Modo [Q] Sair ",
-            el_min, el_sec, tot_min, rem_min, rem_sec, WOOD_SPECIES[g_wood_type].name,
-            g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
-        if (n > 0) buf_len += n;
     }
 
-    // Cinematic Dark Souls banner overlay: "BONFIRE LIT"
-    if (g_is_dark_souls && g_banner_timer > 0.0f) {
+    // -------------------------------------------------------------------------
+    // CINEMATIC BANNER OVERLAYS (Lit, Rest, Extinguished)
+    // -------------------------------------------------------------------------
+    if (g_banner_timer > 0.0f && g_banner_type != BANNER_NONE) {
         float alpha = 1.0f;
         if (g_banner_timer > 3.3f) {
             alpha = (4.0f - g_banner_timer) / 0.7f;
@@ -3798,79 +3963,136 @@ static int format_frame_buffer(char *buf, int buf_cap) {
         if (alpha < 0.05f) alpha = 0.05f;
         if (alpha > 1.0f) alpha = 1.0f;
 
-        int r_acc = (int)(185.0f * alpha);
-        int g_acc = (int)(135.0f * alpha);
-        int b_acc = (int)(55.0f * alpha);
-
         int center_row = text_rows / 2;
         int banner_row = center_row - 2;
         if (banner_row < 2) banner_row = 2;
 
-        if (g_pixel_w >= 67) {
-            static const char *s_bonfire_lit_font[3] = {
-                "█▀▀█  █▀▀█  █▄  █  █▀▀  ▀█▀  █▀▀█  █▀▀      █    ▀█▀  ▀█▀",
-                "█▀▀▄  █  █  █ ▀▄█  █▀▀   █   █▄▄▀  █▀▀      █     █    █ ",
-                "▀▀▀   ▀▀▀▀  ▀   ▀  ▀    ▀▀▀  ▀  ▀  ▀▀▀      ▀▀▀  ▀▀▀   ▀ "
-            };
-            int banner_w = 63;
-            int start_col = (g_pixel_w - banner_w) / 2 + 1;
+        if (g_banner_type == BANNER_LIT) {
+            int r_acc = (int)(185.0f * alpha), g_acc = (int)(135.0f * alpha), b_acc = (int)(55.0f * alpha);
+            if (g_pixel_w >= 67) {
+                static const char *s_bonfire_lit_font[3] = {
+                    "█▀▀█  █▀▀█  █▄  █  █▀▀  ▀█▀  █▀▀█  █▀▀      █    ▀█▀  ▀█▀",
+                    "█▀▀▄  █  █  █ ▀▄█  █▀▀   █   █▄▄▀  █▀▀      █     █    █ ",
+                    "▀▀▀   ▀▀▀▀  ▀   ▀  ▀    ▀▀▀  ▀  ▀  ▀▀▀      ▀▀▀  ▀▀▀   ▀ "
+                };
+                int banner_w = 63;
+                int start_col = (g_pixel_w - banner_w) / 2 + 1;
 
-            int r0 = (int)(255.0f * alpha), g0 = (int)(245.0f * alpha), b0 = (int)(185.0f * alpha);
-            int r1 = (int)(250.0f * alpha), g1 = (int)(200.0f * alpha), b1 = (int)(75.0f * alpha);
-            int r2 = (int)(215.0f * alpha), g2 = (int)(135.0f * alpha), b2 = (int)(35.0f * alpha);
+                int r0 = (int)(255.0f * alpha), g0 = (int)(245.0f * alpha), b0 = (int)(185.0f * alpha);
+                int r1 = (int)(250.0f * alpha), g1 = (int)(200.0f * alpha), b1 = (int)(75.0f * alpha);
+                int r2 = (int)(215.0f * alpha), g2 = (int)(135.0f * alpha), b2 = (int)(35.0f * alpha);
 
-            // Row 0: Top divider bar
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
-                banner_row, start_col, r_acc, g_acc, b_acc);
-            if (n > 0) buf_len += n;
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
+                    banner_row, start_col, r_acc, g_acc, b_acc);
+                if (n > 0) buf_len += n;
 
-            // Row 1: Big font row 0
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                banner_row + 1, start_col, r0, g0, b0, s_bonfire_lit_font[0]);
-            if (n > 0) buf_len += n;
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                    banner_row + 1, start_col, r0, g0, b0, s_bonfire_lit_font[0]);
+                if (n > 0) buf_len += n;
 
-            // Row 2: Big font row 1
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                banner_row + 2, start_col, r1, g1, b1, s_bonfire_lit_font[1]);
-            if (n > 0) buf_len += n;
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                    banner_row + 2, start_col, r1, g1, b1, s_bonfire_lit_font[1]);
+                if (n > 0) buf_len += n;
 
-            // Row 3: Big font row 2
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                banner_row + 3, start_col, r2, g2, b2, s_bonfire_lit_font[2]);
-            if (n > 0) buf_len += n;
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                    banner_row + 3, start_col, r2, g2, b2, s_bonfire_lit_font[2]);
+                if (n > 0) buf_len += n;
 
-            // Row 4: Bottom divider bar
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
-                banner_row + 4, start_col, r_acc, g_acc, b_acc);
-            if (n > 0) buf_len += n;
-        } else {
-            const char *title = "B O N F I R E   L I T";
-            int title_len = 21;
-            int banner_w = 44;
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
+                    banner_row + 4, start_col, r_acc, g_acc, b_acc);
+                if (n > 0) buf_len += n;
+            } else {
+                const char *title = "B O N F I R E   L I T";
+                int title_len = 21;
+                int banner_w = 44;
+                if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
+                int start_col = (g_pixel_w - banner_w) / 2 + 1;
+                int text_col = (g_pixel_w - title_len) / 2 + 1;
+                int r_text = (int)(255.0f * alpha), g_text = (int)(225.0f * alpha), b_text = (int)(130.0f * alpha);
+
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                    banner_row, start_col, r_acc, g_acc, b_acc);
+                if (n > 0) buf_len += n;
+
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                    banner_row + 1, text_col, r_text, g_text, b_text, title);
+                if (n > 0) buf_len += n;
+
+                n = snprintf(buf + buf_len, buf_cap - buf_len,
+                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                    banner_row + 2, start_col, r_acc, g_acc, b_acc);
+                if (n > 0) buf_len += n;
+            }
+        } else if (g_banner_type == BANNER_REST) {
+            int r_acc = (int)(200.0f * alpha), g_acc = (int)(100.0f * alpha), b_acc = (int)(40.0f * alpha);
+            const char *title1 = "R E S T   A T   B O N F I R E";
+            const char *title2 = "[E / K] Cutuque a Brasa para Reacender";
+            int banner_w = 46;
             if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
             int start_col = (g_pixel_w - banner_w) / 2 + 1;
-            int text_col = (g_pixel_w - title_len) / 2 + 1;
+            int text_col1 = (g_pixel_w - 29) / 2 + 1;
+            int text_col2 = (g_pixel_w - 38) / 2 + 1;
 
-            int r_text = (int)(255.0f * alpha), g_text = (int)(225.0f * alpha), b_text = (int)(130.0f * alpha);
+            int r_t1 = (int)(255.0f * alpha), g_t1 = (int)(175.0f * alpha), b_t1 = (int)(80.0f * alpha);
+            int r_t2 = (int)(230.0f * alpha), g_t2 = (int)(230.0f * alpha), b_t2 = (int)(210.0f * alpha);
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm── ─── ───────────────────────────────────── ─── ──\033[0m",
                 banner_row, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                banner_row + 1, text_col, r_text, g_text, b_text, title);
+                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 1, text_col1, r_t1, g_t1, b_t1, title1);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
-                banner_row + 2, start_col, r_acc, g_acc, b_acc);
+                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 2, text_col2, r_t2, g_t2, b_t2, title2);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm── ─── ───────────────────────────────────── ─── ──\033[0m",
+                banner_row + 3, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+        } else if (g_banner_type == BANNER_EXTINGUISHED) {
+            int r_acc = (int)(130.0f * alpha), g_acc = (int)(40.0f * alpha), b_acc = (int)(40.0f * alpha);
+            const char *title1 = "B O N F I R E   E X T I N G U I S H E D";
+            const char *title2 = "Cinzas Frias  ─  Pressione [E] para Reacender";
+            int banner_w = 48;
+            if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
+            int start_col = (g_pixel_w - banner_w) / 2 + 1;
+            int text_col1 = (g_pixel_w - 39) / 2 + 1;
+            int text_col2 = (g_pixel_w - 45) / 2 + 1;
+
+            int r_t1 = (int)(220.0f * alpha), g_t1 = (int)(70.0f * alpha), b_t1 = (int)(70.0f * alpha);
+            int r_t2 = (int)(180.0f * alpha), g_t2 = (int)(180.0f * alpha), b_t2 = (int)(180.0f * alpha);
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────────────── ─── ──\033[0m",
+                banner_row, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 1, text_col1, r_t1, g_t1, b_t1, title1);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 2, text_col2, r_t2, g_t2, b_t2, title2);
+            if (n > 0) buf_len += n;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────────────── ─── ──\033[0m",
+                banner_row + 3, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
         }
     }
@@ -3888,21 +4110,26 @@ static void present_frame(void) {
     }
 }
 
-static void ignite_bonfire(void) {
-    if (g_bonfire_lit) return;
+static void ignite_fireplace(bool is_rekindle) {
+    if (g_fire_state == FIRE_STATE_LIT_FOCUS && !is_rekindle) return;
+
+    g_fire_state = FIRE_STATE_LIT_FOCUS;
     g_bonfire_lit = true;
     g_ignition_timer = 0.01f;
+    g_banner_type = BANNER_LIT;
     g_banner_timer = 4.0f;
-    g_sim_time = 0.0f; // Start pomodoro countdown at the moment of ignition
+    g_pomodoro_elapsed = 0.0f;
+    g_pomodoro_paused = false;
+    g_cycle_logged = false;
 
-    // Mini-explosão radial de fagulhas 3D e brasas estilo Dark Souls
+    // Mini-explosão radial de fagulhas 3D e brasas estilo Dark Souls para todas as fogueiras
     for (int i = 0; i < 180; i++) {
         float angle = rand_f() * 2.0f * (float)M_PI;
         float r = 0.10f + 0.90f * rand_f();
         Vec3 sp_p = (Vec3){
-            0.04f + r * cosf(angle),
+            (g_is_dark_souls ? 0.04f : 0.0f) + r * cosf(angle),
             -2.85f + rand_f() * 0.95f,
-            -0.04f + r * sinf(angle)
+            (g_is_dark_souls ? -0.04f : 0.0f) + r * sinf(angle)
         };
         float speed = 2.4f + rand_f() * 5.0f;
         float v_up = 3.8f + rand_f() * 5.8f;
@@ -3916,6 +4143,21 @@ static void ignite_bonfire(void) {
     }
 
     g_ash_bed.heat = 1.0f;
+
+    if (!g_is_dark_souls) {
+        if (is_rekindle) {
+            stoke_fire_add_wood();
+        } else {
+            g_sim_time = 0.0f;
+            for (int i = 0; i < g_num_logs; i++) {
+                for (int s = 0; s < NUM_LOG_SEGS; s++) {
+                    g_logs[i].segments[s].temp = fmaxf(g_logs[i].segments[s].temp, 0.45f);
+                    g_logs[i].segments[s].moisture = 0.02f;
+                }
+            }
+        }
+    }
+
     for (int y = 0; y < g_pixel_h; y++) {
         for (int x = 0; x < g_pixel_w; x++) {
             int cx = g_pixel_w / 2;
@@ -3948,21 +4190,37 @@ static void handle_input(void) {
                     }
                 }
             }
+        } else if (ch == '\t') {
+            // Cycle preset focus durations: 25 -> 30 -> 45 -> 50 -> 25 min
+            float current_m = g_focus_duration / 60.0f;
+            if (fabsf(current_m - 25.0f) < 1.0f) g_focus_duration = 30.0f * 60.0f;
+            else if (fabsf(current_m - 30.0f) < 1.0f) g_focus_duration = 45.0f * 60.0f;
+            else if (fabsf(current_m - 45.0f) < 1.0f) g_focus_duration = 50.0f * 60.0f;
+            else g_focus_duration = 25.0f * 60.0f;
+        } else if (ch == '+' || ch == '=') {
+            g_focus_duration += 300.0f; // +5 min
+            if (g_focus_duration > 7200.0f) g_focus_duration = 7200.0f; // 120 min max
+        } else if (ch == '-' || ch == '_') {
+            g_focus_duration -= 300.0f; // -5 min
+            if (g_focus_duration < 300.0f) g_focus_duration = 300.0f; // 5 min min
+        } else if (ch == 'p' || ch == 'P') {
+            g_pomodoro_paused = !g_pomodoro_paused;
         } else if (ch == 'a' || ch == 'A' || ch == 'h') {
             g_cam_yaw -= 0.08f;
         } else if (ch == 'd' || ch == 'D' || ch == 'l') {
             g_cam_yaw += 0.08f;
         } else if (ch == 'w' || ch == 'W' || ch == 'k' || ch == 'K') {
             if (ch == 'k' || ch == 'K') {
-                if (g_is_dark_souls) {
+                if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                    ignite_fireplace(true); // Cutucar a brasa para reacender
+                } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                    ignite_fireplace(false);
+                } else {
                     for (int sp = 0; sp < 45; sp++) {
                         Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
                         Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
                         spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
                     }
-                } else {
-                    g_cam_pitch += 0.06f;
-                    if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
                 }
             } else {
                 g_cam_pitch += 0.06f;
@@ -3972,34 +4230,40 @@ static void handle_input(void) {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'e' || ch == 'E') {
-            if (g_is_dark_souls) {
-                if (!g_bonfire_lit) {
-                    ignite_bonfire();
-                } else {
-                    for (int sp = 0; sp < 55; sp++) {
-                        Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
-                        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
-                        spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
-                    }
+            if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                ignite_fireplace(true); // Cutucar a brasa para reacender!
+            } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                ignite_fireplace(false); // Acender
+            } else {
+                // Fogo já ativo: avivar fagulhas
+                for (int sp = 0; sp < 55; sp++) {
+                    Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
+                    Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
+                    spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
                 }
             }
         } else if (ch == '\n' || ch == '\r') {
-            if (g_is_dark_souls && !g_bonfire_lit) {
-                ignite_bonfire();
+            if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                ignite_fireplace(true);
+            } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                ignite_fireplace(false);
             }
         } else if (ch == 'g' || ch == 'G' || ch == 't' || ch == 'T' || ch == ' ') {
-            if (ch == ' ' && g_is_dark_souls && !g_bonfire_lit) {
-                ignite_bonfire();
+            if (ch == ' ' && (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED)) {
+                ignite_fireplace(false);
+            } else if (ch == ' ' && g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                ignite_fireplace(true);
             } else {
                 g_auto_turntable = !g_auto_turntable;
             }
         } else if (ch == 'm' || ch == 'M') {
             g_is_dark_souls = !g_is_dark_souls;
-            if (g_is_dark_souls) {
-                g_bonfire_lit = false;
-                g_banner_timer = 0.0f;
-                g_ignition_timer = 0.0f;
-            }
+            g_fire_state = FIRE_STATE_UNLIT;
+            g_bonfire_lit = false;
+            g_banner_type = BANNER_NONE;
+            g_banner_timer = 0.0f;
+            g_ignition_timer = 0.0f;
+            g_pomodoro_elapsed = 0.0f;
             init_scene();
         } else if (ch == 'f' || ch == 'F') {
             if (!g_is_dark_souls) {
@@ -4012,11 +4276,13 @@ static void handle_input(void) {
                 }
             }
         } else if (ch == 'r' || ch == 'R') {
-            if (g_is_dark_souls) {
-                g_bonfire_lit = false;
-                g_banner_timer = 0.0f;
-                g_ignition_timer = 0.0f;
-            }
+            g_fire_state = FIRE_STATE_UNLIT;
+            g_bonfire_lit = false;
+            g_banner_type = BANNER_NONE;
+            g_banner_timer = 0.0f;
+            g_ignition_timer = 0.0f;
+            g_pomodoro_elapsed = 0.0f;
+            g_pomodoro_paused = false;
             init_scene();
         } else if (ch == 'q' || ch == 'Q') {
             g_running = 0;
@@ -4060,6 +4326,7 @@ typedef struct {
 static BenchmarkResult benchmark_pipeline(const char *scenario_name, bool ds_mode, int w, int h, int num_frames) {
     static char s_bench_buf[524288];
     g_is_dark_souls = ds_mode;
+    g_fire_state = FIRE_STATE_LIT_FOCUS;
     g_bonfire_lit = true;
     g_pixel_w = w;
     g_pixel_h = h;
@@ -4231,20 +4498,44 @@ int main(int argc, char **argv) {
             else if (strcasecmp(w, "pinho") == 0 || strcasecmp(w, "pine") == 0) g_wood_type = 1;
             else if (strcasecmp(w, "betula") == 0 || strcasecmp(w, "birch") == 0) g_wood_type = 2;
             else if (strcasecmp(w, "cerejeira") == 0 || strcasecmp(w, "cherry") == 0) g_wood_type = 3;
-            else g_wood_type = atoi(w) % 4;
+        } else if (strcmp(argv[i], "--lit") == 0) {
+            g_fire_state = FIRE_STATE_LIT_FOCUS;
+            g_bonfire_lit = true;
         } else if ((strcmp(argv[i], "--time") == 0 || strcmp(argv[i], "-t") == 0 || strcmp(argv[i], "--pomodoro") == 0) && i + 1 < argc) {
-            float mins = (float)atof(argv[++i]);
-            if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
+            const char *arg = argv[++i];
+            char *colon = strchr(arg, ':');
+            if (colon) {
+                float foc = (float)atof(arg);
+                float rst = (float)atof(colon + 1);
+                if (foc > 0.0f) {
+                    g_focus_duration = foc * 60.0f;
+                    g_cycle_duration = g_focus_duration;
+                }
+                if (rst > 0.0f) {
+                    g_rest_duration = rst * 60.0f;
+                }
+            } else {
+                float mins = (float)atof(arg);
+                if (mins > 0.0f) {
+                    g_focus_duration = mins * 60.0f;
+                    g_cycle_duration = g_focus_duration;
+                }
+            }
         } else if (strcmp(argv[i], "--scale") == 0 && i + 1 < argc) {
             g_time_scale = (float)atof(argv[++i]);
             g_realtime_mode = (fabsf(g_time_scale - 1.0f) < 0.1f);
         } else if (argv[i][0] >= '0' && argv[i][0] <= '9' && strstr(argv[i], ".ppm") == NULL) {
             float mins = (float)atof(argv[i]);
-            if (mins > 0.0f) g_cycle_duration = mins * 60.0f;
+            if (mins > 0.0f) {
+                g_focus_duration = mins * 60.0f;
+                g_cycle_duration = g_focus_duration;
+            }
         }
     }
 
     if (do_benchmark) {
+        g_fire_state = FIRE_STATE_LIT_FOCUS;
+        g_bonfire_lit = true;
         run_benchmark_suite(benchmark_frames);
         return 0;
     }
@@ -4252,7 +4543,13 @@ int main(int argc, char **argv) {
     if (do_snapshot && snapshot_out != NULL) {
         g_pixel_w = 120;
         g_pixel_h = 70;
-        g_bonfire_lit = !force_unlit;
+        if (force_unlit) {
+            g_fire_state = FIRE_STATE_UNLIT;
+            g_bonfire_lit = false;
+        } else {
+            g_fire_state = FIRE_STATE_LIT_FOCUS;
+            g_bonfire_lit = true;
+        }
         init_scene();
         g_cam_yaw = snapshot_yaw * (float)M_PI / 180.0f;
         g_cam_pitch = snapshot_pitch * (float)M_PI / 180.0f;
@@ -4279,6 +4576,7 @@ int main(int argc, char **argv) {
     if (do_turntable) {
         g_pixel_w = 120;
         g_pixel_h = 70;
+        g_fire_state = FIRE_STATE_LIT_FOCUS;
         g_bonfire_lit = true;
         init_scene();
         g_time_scale = 30.0f;
