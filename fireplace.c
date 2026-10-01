@@ -60,7 +60,7 @@ typedef struct {
 
 static const WoodSpecies WOOD_SPECIES[4] = {
     {
-        "Carvalho",
+        "Oak",
         {
             {20, 12, 8}, {42, 27, 18}, {72, 48, 32}, {105, 72, 48}, {138, 96, 64}, {168, 120, 82}, {200, 145, 102}
         },
@@ -70,7 +70,7 @@ static const WoodSpecies WOOD_SPECIES[4] = {
         0.85f, 1.0f
     },
     {
-        "Pinho",
+        "Pine",
         {
             {24, 14, 6}, {52, 32, 16}, {88, 58, 28}, {124, 84, 42}, {162, 114, 58}, {198, 145, 82}, {228, 175, 110}
         },
@@ -80,7 +80,7 @@ static const WoodSpecies WOOD_SPECIES[4] = {
         2.4f, 1.15f
     },
     {
-        "Bétula",
+        "Birch",
         {
             {24, 24, 22}, {60, 60, 56}, {105, 102, 96}, {150, 148, 142}, {192, 190, 184}, {225, 224, 218}, {248, 246, 242}
         },
@@ -90,7 +90,7 @@ static const WoodSpecies WOOD_SPECIES[4] = {
         1.2f, 1.05f
     },
     {
-        "Cerejeira",
+        "Cherry",
         {
             {24, 10, 10}, {50, 22, 20}, {84, 38, 32}, {120, 56, 48}, {158, 80, 68}, {192, 108, 92}, {225, 140, 120}
         },
@@ -414,7 +414,8 @@ typedef enum {
     BANNER_NONE = 0,
     BANNER_LIT = 1,
     BANNER_REST = 2,
-    BANNER_EXTINGUISHED = 3
+    BANNER_LONG_REST = 3,
+    BANNER_EXTINGUISHED = 4
 } BannerType;
 
 // Dark Souls Coiled Sword (Espada Espiral) & Bone Pile
@@ -429,10 +430,14 @@ static Bone3D g_bones[MAX_BONES];
 static int g_num_bones = 0;
 
 // Pomodoro Focus & Rest cycle management
-static float g_focus_duration = 1500.0f; // 25 min default
-static float g_rest_duration = 300.0f;   // 5 min rest tolerance
-static float g_pomodoro_elapsed = 0.0f;  // Seconds elapsed in current state
-static int g_pomodoro_cycles_done = 0;   // Completed focus cycles
+static float g_focus_duration = 1500.0f;        // 25 min default
+static float g_short_break_duration = 300.0f;   // 5 min default
+static float g_long_break_duration = 900.0f;    // 15 min default
+static int g_sessions_before_long_break = 4;    // 4 sessions default
+static float g_rest_duration = 300.0f;          // Active rest tolerance
+static bool g_is_long_break = false;            // Current break is long break
+static float g_pomodoro_elapsed = 0.0f;         // Seconds elapsed in current state
+static int g_pomodoro_cycles_done = 0;          // Completed focus cycles
 static bool g_pomodoro_paused = false;
 static float g_auto_wood_check_timer = 0.0f;
 
@@ -1845,16 +1850,24 @@ static void update_simulation(void) {
                 g_fire_state = FIRE_STATE_SMOLDERING_REST;
                 g_pomodoro_elapsed = 0.0f;
                 g_pomodoro_cycles_done++;
-                g_banner_type = BANNER_REST;
+                if (g_sessions_before_long_break > 0 && (g_pomodoro_cycles_done % g_sessions_before_long_break == 0)) {
+                    g_is_long_break = true;
+                    g_rest_duration = g_long_break_duration;
+                    g_banner_type = BANNER_LONG_REST;
+                } else {
+                    g_is_long_break = false;
+                    g_rest_duration = g_short_break_duration;
+                    g_banner_type = BANNER_REST;
+                }
                 g_banner_timer = 4.0f;
                 if (!g_cycle_logged) {
                     g_cycle_logged = true;
                     int target_min = (int)(g_focus_duration / 60.0f);
                     char mode_desc[64];
                     if (g_is_dark_souls) {
-                        snprintf(mode_desc, sizeof(mode_desc), "Dark Souls Bonfire (Ciclo %02d)", g_pomodoro_cycles_done);
+                        snprintf(mode_desc, sizeof(mode_desc), "Dark Souls Bonfire (Session %02d)", g_pomodoro_cycles_done);
                     } else {
-                        snprintf(mode_desc, sizeof(mode_desc), "Tenda %s (Ciclo %02d)", WOOD_SPECIES[g_wood_type].name, g_pomodoro_cycles_done);
+                        snprintf(mode_desc, sizeof(mode_desc), "Teepee %s (Session %02d)", WOOD_SPECIES[g_wood_type].name, g_pomodoro_cycles_done);
                     }
                     log_bonfire_history(target_min, target_min, mode_desc, true);
                 }
@@ -3848,7 +3861,7 @@ static int format_frame_buffer(char *buf, int buf_cap) {
 
         if (g_fire_state == FIRE_STATE_UNLIT) {
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;30m[ FOGUEIRA APAGADA ]\033[0m  \033[1;38;2;220;180;90mFoco: %02d:00\033[0m  |  \033[1;37m[E / Espaço]\033[0m \033[38;2;255;215;100mAcender Fogueira\033[0m",
+                "\033[1;30m[ BONFIRE UNLIT ]\033[0m  \033[1;38;2;220;180;90mFocus: %02d:00\033[0m  |  \033[1;37m[E / Space]\033[0m \033[38;2;255;215;100mKindle Bonfire\033[0m",
                 (int)(g_focus_duration / 60.0f));
         } else if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
             float el_foc = fminf(g_focus_duration, g_pomodoro_elapsed);
@@ -3867,10 +3880,11 @@ static int format_frame_buffer(char *buf, int buf_cap) {
             for (int b = 0; b < filled; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "█");
             for (int b = filled; b < bar_w; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "░");
 
+            int curr_session = (g_sessions_before_long_break > 0) ? ((g_pomodoro_cycles_done % g_sessions_before_long_break) + 1) : 1;
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;38;2;255;160;40mFOCO [%02d]\033[0m  \033[1;31m🔥\033[0m \033[1;37m%02d:%02d / %02d:%02d\033[0m  \033[38;2;255;190;60m[%s]\033[0m \033[1;33m%2d%%\033[0m  \033[38;2;180;180;180m(Resta %02d:%02d)\033[0m%s",
-                g_pomodoro_cycles_done + 1, e_m, e_s, t_m, t_s, bar, (int)(pct * 100.0f), r_m, r_s,
-                g_pomodoro_paused ? "  \033[1;33m[PAUSADO]\033[0m" : "");
+                "\033[1;38;2;255;160;40mFOCUS [%02d/%02d]\033[0m  \033[1;31m🔥\033[0m \033[1;37m%02d:%02d / %02d:%02d\033[0m  \033[38;2;255;190;60m[%s]\033[0m \033[1;33m%2d%%\033[0m  \033[38;2;180;180;180m(Left %02d:%02d)\033[0m%s",
+                curr_session, g_sessions_before_long_break, e_m, e_s, t_m, t_s, bar, (int)(pct * 100.0f), r_m, r_s,
+                g_pomodoro_paused ? "  \033[1;33m[PAUSED]\033[0m" : "");
         } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
             float el_rst = fminf(g_rest_duration, g_pomodoro_elapsed);
             float rem_rst = fmaxf(0.0f, g_rest_duration - el_rst);
@@ -3885,12 +3899,14 @@ static int format_frame_buffer(char *buf, int buf_cap) {
             for (int b = 0; b < filled; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "█");
             for (int b = filled; b < bar_w; b++) bpos += snprintf(bar + bpos, sizeof(bar) - bpos, "░");
 
+            const char *rest_title = g_is_long_break ? "\033[1;38;2;120;210;255mLONG BREAK\033[0m" : "\033[1;38;2;255;110;30mSHORT BREAK\033[0m";
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;38;2;255;110;30mDESCANSO / BRASA CURTA\033[0m  \033[1;33m⏳ %02d:%02d\033[0m  \033[38;2;200;120;40m[%s]\033[0m  \033[1;37m[E / K]\033[0m \033[1;38;2;255;215;100mCutucar Brasa para Reacender\033[0m",
-                r_m, r_s, bar);
+                "%s  \033[1;33m⏳ %02d:%02d\033[0m  \033[38;2;200;120;40m[%s]\033[0m  \033[1;37m[E / Space]\033[0m \033[1;38;2;255;215;100mStoke Embers to Rekindle\033[0m%s",
+                rest_title, r_m, r_s, bar,
+                g_pomodoro_paused ? "  \033[1;33m[PAUSED]\033[0m" : "");
         } else {
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;30m[ FOGUEIRA EXTINTA / CINZAS FRIAS ]\033[0m  \033[1;37m[E / Espaço]\033[0m \033[38;2;255;215;100mReacender Novo Ciclo\033[0m");
+                "\033[1;30m[ EXTINGUISHED / COLD ASHES ]\033[0m  \033[1;37m[E / Space]\033[0m \033[38;2;255;215;100mKindle New Cycle\033[0m");
         }
 
         if (hud_len > 0) {
@@ -3901,59 +3917,47 @@ static int format_frame_buffer(char *buf, int buf_cap) {
     }
 
     // -------------------------------------------------------------------------
-    // BOTTOM STATUS FOOTER LINE
+    // BOTTOM SHORTCUTS FOOTER LINE (Clean & minimal, no redundant status)
     // -------------------------------------------------------------------------
-    float el_focus_sec = fminf(g_focus_duration, g_pomodoro_elapsed);
-    int el_min = (int)(el_focus_sec / 60.0f);
-    int el_sec = (int)fmodf(el_focus_sec, 60.0f);
-    int tot_min = (int)(g_focus_duration / 60.0f);
-    float rem_sec_total = fmaxf(0.0f, g_focus_duration - el_focus_sec);
-    int rem_min = (int)(rem_sec_total / 60.0f);
-    int rem_sec = (int)fmodf(rem_sec_total, 60.0f);
-
-    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[%d;1H", text_rows);
+    n = snprintf(buf + buf_len, buf_cap - buf_len, "\033[%d;1H\033[2K", text_rows);
     if (n > 0) buf_len += n;
 
+    char footer_buf[256];
     if (g_fire_state == FIRE_STATE_UNLIT) {
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[1;30m[APAGADA]\033[0m \033[1;37m[E/Espaço]\033[0m \033[1;38;2;255;215;100mAcender Fogueira\033[0m | [+/-] %02dmin [Tab] Presets [P] Pausar | Giro: %s | [←/→] Girar [M] Modo [Q] Sair ",
-            tot_min, g_auto_turntable ? "\033[1;32mON\033[0m" : "\033[1;30mOFF\033[0m");
-        if (n > 0) buf_len += n;
+        snprintf(footer_buf, sizeof(footer_buf),
+            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
+            "\033[38;2;160;160;160m[Q] Quit\033[0m");
     } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
-        float rem_rst = fmaxf(0.0f, g_rest_duration - g_pomodoro_elapsed);
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[1;38;2;255;110;30m[BRASA CURTA]\033[0m \033[1;37m[E/K]\033[0m \033[1;38;2;255;215;100mCutucar Brasa / Reacender\033[0m (Apaga em: \033[1;33m%02d:%02d\033[0m) | [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
-            (int)(rem_rst / 60.0f), (int)fmodf(rem_rst, 60.0f), tot_min);
-        if (n > 0) buf_len += n;
+        snprintf(footer_buf, sizeof(footer_buf),
+            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mRekindle\033[0m   "
+            "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
+            g_pomodoro_paused ? "Resume" : "Pause");
     } else if (g_fire_state == FIRE_STATE_EXTINGUISHED) {
-        n = snprintf(buf + buf_len, buf_cap - buf_len,
-            "\033[1;31m[EXTINTA]\033[0m \033[1;37m[E/Espaço]\033[0m \033[1;38;2;255;215;100mReacender\033[0m | Fogueira morreu por falta de cutucar | [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
-            tot_min);
-        if (n > 0) buf_len += n;
+        snprintf(footer_buf, sizeof(footer_buf),
+            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle New Cycle\033[0m   "
+            "\033[38;2;160;160;160m[Q] Quit\033[0m");
     } else {
         // Active LIT FOCUS
         if (g_is_dark_souls) {
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[1;31m[BONFIRE LIT]\033[0m Foco: \033[1;37m%02d:%02d / %02d:00\033[0m (Resta %02d:%02d)%s | [E/K] Avivar [P] %s [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
-                el_min, el_sec, tot_min, rem_min, rem_sec,
-                g_pomodoro_paused ? " \033[1;33m[PAUSA]\033[0m" : "",
-                g_pomodoro_paused ? "Retomar" : "Pausar", tot_min);
-            if (n > 0) buf_len += n;
+            snprintf(footer_buf, sizeof(footer_buf),
+                "\033[1;37m[E]\033[0m \033[38;2;255;200;90mStoke\033[0m   "
+                "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
+                g_pomodoro_paused ? "Resume" : "Pause");
         } else {
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[1;33m[Lareira 3D]\033[0m Foco: \033[1;37m%02d:%02d / %02d:00\033[0m (Resta %02d:%02d)%s | Madeira: \033[1;36m%s\033[0m [F] Lenha [P] %s [+/-] %02dmin [Tab] Presets [M] Modo [Q] Sair ",
-                el_min, el_sec, tot_min, rem_min, rem_sec,
-                g_pomodoro_paused ? " \033[1;33m[PAUSA]\033[0m" : "",
-                WOOD_SPECIES[g_wood_type].name,
-                g_pomodoro_paused ? "Retomar" : "Pausar", tot_min);
-            if (n > 0) buf_len += n;
+            snprintf(footer_buf, sizeof(footer_buf),
+                "\033[1;37m[F]\033[0m \033[38;2;255;200;90mWood\033[0m   "
+                "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
+                g_pomodoro_paused ? "Resume" : "Pause");
         }
     }
+
+    n = snprintf(buf + buf_len, buf_cap - buf_len, " %s ", footer_buf);
+    if (n > 0) buf_len += n;
 
     // -------------------------------------------------------------------------
     // CINEMATIC BANNER OVERLAYS (Lit, Rest, Extinguished)
     // -------------------------------------------------------------------------
-    if (g_banner_timer > 0.0f && g_banner_type != BANNER_NONE) {
+    if (g_banner_timer > 0.0f && g_banner_type == BANNER_LIT) {
         float alpha = 1.0f;
         if (g_banner_timer > 3.3f) {
             alpha = (4.0f - g_banner_timer) / 0.7f;
@@ -3967,132 +3971,66 @@ static int format_frame_buffer(char *buf, int buf_cap) {
         int banner_row = center_row - 2;
         if (banner_row < 2) banner_row = 2;
 
-        if (g_banner_type == BANNER_LIT) {
-            int r_acc = (int)(185.0f * alpha), g_acc = (int)(135.0f * alpha), b_acc = (int)(55.0f * alpha);
-            if (g_pixel_w >= 67) {
-                static const char *s_bonfire_lit_font[3] = {
-                    "█▀▀█  █▀▀█  █▄  █  █▀▀  ▀█▀  █▀▀█  █▀▀      █    ▀█▀  ▀█▀",
-                    "█▀▀▄  █  █  █ ▀▄█  █▀▀   █   █▄▄▀  █▀▀      █     █    █ ",
-                    "▀▀▀   ▀▀▀▀  ▀   ▀  ▀    ▀▀▀  ▀  ▀  ▀▀▀      ▀▀▀  ▀▀▀   ▀ "
-                };
-                int banner_w = 63;
-                int start_col = (g_pixel_w - banner_w) / 2 + 1;
-
-                int r0 = (int)(255.0f * alpha), g0 = (int)(245.0f * alpha), b0 = (int)(185.0f * alpha);
-                int r1 = (int)(250.0f * alpha), g1 = (int)(200.0f * alpha), b1 = (int)(75.0f * alpha);
-                int r2 = (int)(215.0f * alpha), g2 = (int)(135.0f * alpha), b2 = (int)(35.0f * alpha);
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
-                    banner_row, start_col, r_acc, g_acc, b_acc);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                    banner_row + 1, start_col, r0, g0, b0, s_bonfire_lit_font[0]);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                    banner_row + 2, start_col, r1, g1, b1, s_bonfire_lit_font[1]);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
-                    banner_row + 3, start_col, r2, g2, b2, s_bonfire_lit_font[2]);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
-                    banner_row + 4, start_col, r_acc, g_acc, b_acc);
-                if (n > 0) buf_len += n;
-            } else {
-                const char *title = "B O N F I R E   L I T";
-                int title_len = 21;
-                int banner_w = 44;
-                if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
-                int start_col = (g_pixel_w - banner_w) / 2 + 1;
-                int text_col = (g_pixel_w - title_len) / 2 + 1;
-                int r_text = (int)(255.0f * alpha), g_text = (int)(225.0f * alpha), b_text = (int)(130.0f * alpha);
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
-                    banner_row, start_col, r_acc, g_acc, b_acc);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                    banner_row + 1, text_col, r_text, g_text, b_text, title);
-                if (n > 0) buf_len += n;
-
-                n = snprintf(buf + buf_len, buf_cap - buf_len,
-                    "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
-                    banner_row + 2, start_col, r_acc, g_acc, b_acc);
-                if (n > 0) buf_len += n;
-            }
-        } else if (g_banner_type == BANNER_REST) {
-            int r_acc = (int)(200.0f * alpha), g_acc = (int)(100.0f * alpha), b_acc = (int)(40.0f * alpha);
-            const char *title1 = "R E S T   A T   B O N F I R E";
-            const char *title2 = "[E / K] Cutuque a Brasa para Reacender";
-            int banner_w = 46;
-            if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
+        int r_acc = (int)(185.0f * alpha), g_acc = (int)(135.0f * alpha), b_acc = (int)(55.0f * alpha);
+        if (g_pixel_w >= 67) {
+            static const char *s_bonfire_lit_font[3] = {
+                "█▀▀█  █▀▀█  █▄  █  █▀▀  ▀█▀  █▀▀█  █▀▀      █    ▀█▀  ▀█▀",
+                "█▀▀▄  █  █  █ ▀▄█  █▀▀   █   █▄▄▀  █▀▀      █     █    █ ",
+                "▀▀▀   ▀▀▀▀  ▀   ▀  ▀    ▀▀▀  ▀  ▀  ▀▀▀      ▀▀▀  ▀▀▀   ▀ "
+            };
+            int banner_w = 63;
             int start_col = (g_pixel_w - banner_w) / 2 + 1;
-            int text_col1 = (g_pixel_w - 29) / 2 + 1;
-            int text_col2 = (g_pixel_w - 38) / 2 + 1;
 
-            int r_t1 = (int)(255.0f * alpha), g_t1 = (int)(175.0f * alpha), b_t1 = (int)(80.0f * alpha);
-            int r_t2 = (int)(230.0f * alpha), g_t2 = (int)(230.0f * alpha), b_t2 = (int)(210.0f * alpha);
+            int r0 = (int)(255.0f * alpha), g0 = (int)(245.0f * alpha), b0 = (int)(185.0f * alpha);
+            int r1 = (int)(250.0f * alpha), g1 = (int)(200.0f * alpha), b1 = (int)(75.0f * alpha);
+            int r2 = (int)(215.0f * alpha), g2 = (int)(135.0f * alpha), b2 = (int)(35.0f * alpha);
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm── ─── ───────────────────────────────────── ─── ──\033[0m",
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
                 banner_row, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                banner_row + 1, text_col1, r_t1, g_t1, b_t1, title1);
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 1, start_col, r0, g0, b0, s_bonfire_lit_font[0]);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                banner_row + 2, text_col2, r_t2, g_t2, b_t2, title2);
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 2, start_col, r1, g1, b1, s_bonfire_lit_font[1]);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;16;8;6m\033[1;38;2;%d;%d;%dm── ─── ───────────────────────────────────── ─── ──\033[0m",
-                banner_row + 3, start_col, r_acc, g_acc, b_acc);
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm   %s   \033[0m",
+                banner_row + 3, start_col, r2, g2, b2, s_bonfire_lit_font[2]);
             if (n > 0) buf_len += n;
-        } else if (g_banner_type == BANNER_EXTINGUISHED) {
-            int r_acc = (int)(130.0f * alpha), g_acc = (int)(40.0f * alpha), b_acc = (int)(40.0f * alpha);
-            const char *title1 = "B O N F I R E   E X T I N G U I S H E D";
-            const char *title2 = "Cinzas Frias  ─  Pressione [E] para Reacender";
-            int banner_w = 48;
+
+            n = snprintf(buf + buf_len, buf_cap - buf_len,
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm  ─── ── ───────────────────────────────────────────── ── ───  \033[0m",
+                banner_row + 4, start_col, r_acc, g_acc, b_acc);
+            if (n > 0) buf_len += n;
+        } else {
+            const char *title = "B O N F I R E   L I T";
+            int title_len = 21;
+            int banner_w = 44;
             if (banner_w > g_pixel_w - 4) banner_w = g_pixel_w - 4;
             int start_col = (g_pixel_w - banner_w) / 2 + 1;
-            int text_col1 = (g_pixel_w - 39) / 2 + 1;
-            int text_col2 = (g_pixel_w - 45) / 2 + 1;
-
-            int r_t1 = (int)(220.0f * alpha), g_t1 = (int)(70.0f * alpha), b_t1 = (int)(70.0f * alpha);
-            int r_t2 = (int)(180.0f * alpha), g_t2 = (int)(180.0f * alpha), b_t2 = (int)(180.0f * alpha);
+            int text_col = (g_pixel_w - title_len) / 2 + 1;
+            int r_text = (int)(255.0f * alpha), g_text = (int)(225.0f * alpha), b_text = (int)(130.0f * alpha);
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────────────── ─── ──\033[0m",
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
                 banner_row, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                banner_row + 1, text_col1, r_t1, g_t1, b_t1, title1);
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
+                banner_row + 1, text_col, r_text, g_text, b_text, title);
             if (n > 0) buf_len += n;
 
             n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm%s\033[0m",
-                banner_row + 2, text_col2, r_t2, g_t2, b_t2, title2);
-            if (n > 0) buf_len += n;
-
-            n = snprintf(buf + buf_len, buf_cap - buf_len,
-                "\033[%d;%dH\033[48;2;12;6;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────────────── ─── ──\033[0m",
-                banner_row + 3, start_col, r_acc, g_acc, b_acc);
+                "\033[%d;%dH\033[48;2;12;8;6m\033[1;38;2;%d;%d;%dm── ─── ─────────────────────────────── ─── ──\033[0m",
+                banner_row + 2, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
         }
     }
@@ -4190,19 +4128,6 @@ static void handle_input(void) {
                     }
                 }
             }
-        } else if (ch == '\t') {
-            // Cycle preset focus durations: 25 -> 30 -> 45 -> 50 -> 25 min
-            float current_m = g_focus_duration / 60.0f;
-            if (fabsf(current_m - 25.0f) < 1.0f) g_focus_duration = 30.0f * 60.0f;
-            else if (fabsf(current_m - 30.0f) < 1.0f) g_focus_duration = 45.0f * 60.0f;
-            else if (fabsf(current_m - 45.0f) < 1.0f) g_focus_duration = 50.0f * 60.0f;
-            else g_focus_duration = 25.0f * 60.0f;
-        } else if (ch == '+' || ch == '=') {
-            g_focus_duration += 300.0f; // +5 min
-            if (g_focus_duration > 7200.0f) g_focus_duration = 7200.0f; // 120 min max
-        } else if (ch == '-' || ch == '_') {
-            g_focus_duration -= 300.0f; // -5 min
-            if (g_focus_duration < 300.0f) g_focus_duration = 300.0f; // 5 min min
         } else if (ch == 'p' || ch == 'P') {
             g_pomodoro_paused = !g_pomodoro_paused;
         } else if (ch == 'a' || ch == 'A' || ch == 'h') {
@@ -4226,7 +4151,28 @@ static void handle_input(void) {
                 g_cam_pitch += 0.06f;
                 if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
             }
-        } else if (ch == 's' || ch == 'S' || ch == 'j') {
+        } else if (ch == 's' || ch == 'S' || ch == 'n' || ch == 'N') {
+            // Skip current Pomodoro phase
+            if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+                g_pomodoro_elapsed = 0.0f;
+                g_pomodoro_cycles_done++;
+                if (g_sessions_before_long_break > 0 && (g_pomodoro_cycles_done % g_sessions_before_long_break == 0)) {
+                    g_is_long_break = true;
+                    g_rest_duration = g_long_break_duration;
+                    g_banner_type = BANNER_LONG_REST;
+                } else {
+                    g_is_long_break = false;
+                    g_rest_duration = g_short_break_duration;
+                    g_banner_type = BANNER_REST;
+                }
+                g_banner_timer = 3.5f;
+                g_fire_state = FIRE_STATE_SMOLDERING_REST;
+            } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                ignite_fireplace(true);
+            } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                ignite_fireplace(false);
+            }
+        } else if (ch == 'j' || ch == 'J' || ch == 'z' || ch == 'Z') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
         } else if (ch == 'e' || ch == 'E') {
@@ -4256,15 +4202,6 @@ static void handle_input(void) {
             } else {
                 g_auto_turntable = !g_auto_turntable;
             }
-        } else if (ch == 'm' || ch == 'M') {
-            g_is_dark_souls = !g_is_dark_souls;
-            g_fire_state = FIRE_STATE_UNLIT;
-            g_bonfire_lit = false;
-            g_banner_type = BANNER_NONE;
-            g_banner_timer = 0.0f;
-            g_ignition_timer = 0.0f;
-            g_pomodoro_elapsed = 0.0f;
-            init_scene();
         } else if (ch == 'f' || ch == 'F') {
             if (!g_is_dark_souls) {
                 stoke_fire_add_wood();
@@ -4443,12 +4380,206 @@ static void run_benchmark_suite(int frames) {
     printf("===================================================================================================\n\n");
 }
 
+static bool run_setup_menu(void) {
+    int selected = 0; // 0: Style, 1: Focus, 2: Short Break, 3: Long Break, 4: Sessions
+    bool in_menu = true;
+
+    int focus_min = (int)(g_focus_duration / 60.0f);
+    int short_break_min = (int)(g_short_break_duration / 60.0f);
+    int long_break_min = (int)(g_long_break_duration / 60.0f);
+    int sessions = g_sessions_before_long_break;
+
+    char menu_buf[8192];
+    struct timespec ts = {0, 25000000L}; // 40 FPS
+
+    safe_write(STDOUT_FILENO, "\033[2J\033[H", 7);
+
+    while (in_menu && g_running) {
+        if (g_resized) {
+            g_resized = 0;
+            update_dimensions();
+            safe_write(STDOUT_FILENO, "\033[2J\033[H", 7);
+        }
+
+        char ch;
+        while (read(STDIN_FILENO, &ch, 1) > 0) {
+            if (ch == '\033') {
+                char seq[2];
+                if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
+                    if (seq[0] == '[') {
+                        if (seq[1] == 'A') { // Up
+                            selected = (selected + 4) % 5;
+                        } else if (seq[1] == 'B') { // Down
+                            selected = (selected + 1) % 5;
+                        } else if (seq[1] == 'D') { // Left
+                            if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                            else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
+                            else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
+                            else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
+                            else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
+                        } else if (seq[1] == 'C') { // Right
+                            if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                            else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
+                            else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
+                            else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
+                            else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
+                        }
+                    }
+                }
+            } else if (ch >= '1' && ch <= '5') {
+                selected = ch - '1';
+            } else if (ch == 'w' || ch == 'W' || ch == 'k' || ch == 'K') {
+                selected = (selected + 4) % 5;
+            } else if (ch == 's' || ch == 'S' || ch == 'j' || ch == 'J') {
+                selected = (selected + 1) % 5;
+            } else if (ch == 'a' || ch == 'A' || ch == 'h' || ch == '-' || ch == '_') {
+                if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
+                else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
+                else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
+                else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
+            } else if (ch == 'd' || ch == 'D' || ch == 'l' || ch == '+' || ch == '=') {
+                if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
+                else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
+                else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
+                else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
+            } else if (ch == '\n' || ch == '\r' || ch == ' ') {
+                in_menu = false;
+                break;
+            } else if (ch == 'q' || ch == 'Q') {
+                g_running = 0;
+                return false;
+            }
+        }
+
+        if (!in_menu) break;
+
+        int box_w = 66;
+        int box_h = 16;
+        int start_r = (g_term_rows - box_h) / 2;
+        if (start_r < 1) start_r = 1;
+        int start_c = (g_term_cols - box_w) / 2;
+        if (start_c < 1) start_c = 1;
+
+        int len = 0;
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len, "\033[H");
+
+        // Border & Header
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╔════════════════════════════════════════════════════════════════╗\033[0m",
+            start_r, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;255;210;110m║                  BONFIRE POMODORO SETUP                        ║\033[0m",
+            start_r + 1, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;180;120;60m║            Configure your session before kindling              ║\033[0m",
+            start_r + 2, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╠════════════════════════════════════════════════════════════════╣\033[0m",
+            start_r + 3, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║                                                                ║\033[0m",
+            start_r + 4, start_c);
+
+        // Row 0: Style
+        const char *style_str = g_is_dark_souls ? "Dark Souls Bonfire" : "Classic Wood Fireplace";
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║ %s[1] Fireplace Style:    ◄ %-23s ►%s ║\033[0m",
+            start_r + 5, start_c,
+            (selected == 0) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
+            style_str,
+            (selected == 0) ? "\033[0m\033[48;2;16;10;8m" : "");
+
+        // Row 1: Focus
+        char foc_str[32];
+        snprintf(foc_str, sizeof(foc_str), "%d min", focus_min);
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║ %s[2] Focus Duration:     ◄ %-23s ►%s ║\033[0m",
+            start_r + 6, start_c,
+            (selected == 1) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
+            foc_str,
+            (selected == 1) ? "\033[0m\033[48;2;16;10;8m" : "");
+
+        // Row 2: Short Break
+        char sb_str[32];
+        snprintf(sb_str, sizeof(sb_str), "%d min", short_break_min);
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║ %s[3] Short Break:        ◄ %-23s ►%s ║\033[0m",
+            start_r + 7, start_c,
+            (selected == 2) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
+            sb_str,
+            (selected == 2) ? "\033[0m\033[48;2;16;10;8m" : "");
+
+        // Row 3: Long Break
+        char lb_str[32];
+        snprintf(lb_str, sizeof(lb_str), "%d min", long_break_min);
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║ %s[4] Long Break:         ◄ %-23s ►%s ║\033[0m",
+            start_r + 8, start_c,
+            (selected == 3) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
+            lb_str,
+            (selected == 3) ? "\033[0m\033[48;2;16;10;8m" : "");
+
+        // Row 4: Sessions
+        char sess_str[32];
+        snprintf(sess_str, sizeof(sess_str), "%d sessions", sessions);
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║ %s[5] Sessions / Cycle:   ◄ %-23s ►%s ║\033[0m",
+            start_r + 9, start_c,
+            (selected == 4) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
+            sess_str,
+            (selected == 4) ? "\033[0m\033[48;2;16;10;8m" : "");
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║                                                                ║\033[0m",
+            start_r + 10, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╠════════════════════════════════════════════════════════════════╣\033[0m",
+            start_r + 11, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;220;190;140m║ [↑/↓ or 1-5] Navigate  [←/→] Adjust  [Enter/Space] Start       ║\033[0m",
+            start_r + 12, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;160;140;120m║ [Q] Exit                                                       ║\033[0m",
+            start_r + 13, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╚════════════════════════════════════════════════════════════════╝\033[0m",
+            start_r + 14, start_c);
+
+        safe_write(STDOUT_FILENO, menu_buf, len);
+        nanosleep(&ts, NULL);
+    }
+
+    if (!g_running) return false;
+
+    // Apply configuration
+    g_focus_duration = (float)focus_min * 60.0f;
+    g_short_break_duration = (float)short_break_min * 60.0f;
+    g_long_break_duration = (float)long_break_min * 60.0f;
+    g_sessions_before_long_break = sessions;
+    g_rest_duration = g_short_break_duration;
+    g_cycle_duration = g_focus_duration;
+
+    safe_write(STDOUT_FILENO, "\033[2J\033[H", 7);
+    return true;
+}
+
 int main(int argc, char **argv) {
     g_rng ^= (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16) ^ 0x9e3779b9;
 
     bool do_benchmark = false;
     int benchmark_frames = 200;
     bool force_unlit = false;
+    bool skip_menu = false;
 
     const char *snapshot_out = NULL;
     float snapshot_sim = 0.0f;
@@ -4465,6 +4596,10 @@ int main(int argc, char **argv) {
         if (strcmp(argv[i], "--history") == 0 || strcmp(argv[i], "-h") == 0) {
             print_bonfire_history();
             return 0;
+        } else if (strcmp(argv[i], "--no-menu") == 0) {
+            skip_menu = true;
+        } else if (strcmp(argv[i], "--menu") == 0) {
+            skip_menu = false;
         } else if (strcmp(argv[i], "--benchmark") == 0 || strcmp(argv[i], "--perf") == 0) {
             do_benchmark = true;
             if (i + 1 < argc && argv[i + 1][0] >= '0' && argv[i + 1][0] <= '9') {
@@ -4610,6 +4745,13 @@ int main(int argc, char **argv) {
 
     setup_terminal();
     update_dimensions();
+
+    if (!skip_menu) {
+        if (!run_setup_menu()) {
+            return 0;
+        }
+    }
+
     init_scene();
 
     struct timespec ts;
@@ -4638,9 +4780,9 @@ int main(int argc, char **argv) {
         if (el_min >= 1) {
             char mode_desc[64];
             if (g_is_dark_souls) {
-                snprintf(mode_desc, sizeof(mode_desc), "Fogueira Dark Souls (Coiled Sword)");
+                snprintf(mode_desc, sizeof(mode_desc), "Dark Souls Bonfire (Coiled Sword)");
             } else {
-                snprintf(mode_desc, sizeof(mode_desc), "Tenda (%s)", WOOD_SPECIES[g_wood_type].name);
+                snprintf(mode_desc, sizeof(mode_desc), "Teepee (%s)", WOOD_SPECIES[g_wood_type].name);
             }
             log_bonfire_history(target_min, el_min, mode_desc, false);
         }
