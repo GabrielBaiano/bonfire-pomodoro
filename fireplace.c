@@ -30,6 +30,14 @@
 #include <signal.h>
 #include <sys/stat.h>
 #include <strings.h>
+#include <sys/wait.h>
+#include <fcntl.h>
+#include "sound_bonfire.h"
+#include "sound_ds_ambient.h"
+#include "sound_wood_ambient.h"
+
+static bool g_sound_enabled = true;
+static int g_sound_volume = 50; // 0-100% volume
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -709,7 +717,99 @@ static void safe_write(int fd, const void *buf, size_t count) {
     (void)ret;
 }
 
+static pid_t g_ambient_pgid = -1;
+
+static void stop_ambient_sound(void) {
+    if (g_ambient_pgid > 0) {
+        kill(-g_ambient_pgid, SIGTERM);
+        int status;
+        waitpid(g_ambient_pgid, &status, WNOHANG);
+        g_ambient_pgid = -1;
+    }
+}
+
+static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
+    if (!g_sound_enabled || volume_pct <= 0) return;
+    stop_ambient_sound();
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+
+    if (pid == 0) {
+        setpgid(0, 0);
+        signal(SIGPIPE, SIG_IGN);
+        signal(SIGTERM, SIG_DFL);
+
+        int audio_pipe[2];
+        if (pipe(audio_pipe) != 0) _exit(1);
+
+        pid_t player = fork();
+        if (player == 0) {
+            close(audio_pipe[1]);
+            if (dup2(audio_pipe[0], STDIN_FILENO) < 0) _exit(1);
+            close(audio_pipe[0]);
+
+            int devnull = open("/dev/null", O_WRONLY);
+            if (devnull >= 0) {
+                dup2(devnull, STDOUT_FILENO);
+                dup2(devnull, STDERR_FILENO);
+                close(devnull);
+            }
+
+            execlp("pw-play", "pw-play", "--raw", "--rate=22050", "--channels=1", "--format=s16", "-", (char *)NULL);
+            execlp("aplay", "aplay", "-q", "-t", "raw", "-r", "22050", "-f", "S16_LE", "-c", "1", "-", (char *)NULL);
+            execlp("paplay", "paplay", "--raw", "--rate=22050", "--channels=1", "--format=s16le", "/dev/stdin", (char *)NULL);
+            _exit(1);
+        }
+
+        if (player < 0) {
+            close(audio_pipe[0]);
+            close(audio_pipe[1]);
+            _exit(1);
+        }
+
+        close(audio_pipe[0]);
+
+        const int16_t *src = (const int16_t *)(is_dark_souls ? assets_ds_fire_ambient_pcm : assets_wood_fire_ambient_pcm);
+        size_t total_samples = (is_dark_souls ? assets_ds_fire_ambient_pcm_len : assets_wood_fire_ambient_pcm_len) / sizeof(int16_t);
+        float vol_factor = (float)volume_pct / 100.0f;
+
+        int16_t chunk[1024];
+        while (1) {
+            size_t sample_pos = 0;
+            while (sample_pos < total_samples) {
+                size_t batch = total_samples - sample_pos;
+                if (batch > 1024) batch = 1024;
+                for (size_t i = 0; i < batch; i++) {
+                    chunk[i] = (int16_t)((float)src[sample_pos + i] * vol_factor);
+                }
+                ssize_t written = write(audio_pipe[1], chunk, batch * sizeof(int16_t));
+                if (written <= 0) {
+                    close(audio_pipe[1]);
+                    waitpid(player, NULL, 0);
+                    _exit(0);
+                }
+                sample_pos += batch;
+            }
+        }
+        _exit(0);
+    }
+
+    g_ambient_pgid = pid;
+}
+
+static void update_ambient_audio(void) {
+    if (!g_sound_enabled || g_sound_volume <= 0 || g_pomodoro_paused || g_fire_state != FIRE_STATE_LIT_FOCUS) {
+        stop_ambient_sound();
+    } else {
+        if (g_ambient_pgid <= 0) {
+            start_ambient_sound(g_is_dark_souls, g_sound_volume);
+        }
+    }
+}
+
 static void reset_terminal(void) {
+    stop_ambient_sound();
     safe_write(STDOUT_FILENO, "\033[?1049l\033[?25h\033[0m\n", 17);
     tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
 }
@@ -3923,31 +4023,39 @@ static int format_frame_buffer(char *buf, int buf_cap) {
     if (n > 0) buf_len += n;
 
     char footer_buf[256];
+    const char *snd_mode = (!g_sound_enabled || g_sound_volume == 0) ? "Muted" : "Sound";
+    int snd_vol = (!g_sound_enabled) ? 0 : g_sound_volume;
+
     if (g_fire_state == FIRE_STATE_UNLIT) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
-            "\033[38;2;160;160;160m[Q] Quit\033[0m");
+            "\033[38;2;160;160;160m[M] %s (%d%%)   [Q] Quit\033[0m",
+            snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mRekindle\033[0m   "
-            "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
-            g_pomodoro_paused ? "Resume" : "Pause");
+            "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+            g_pomodoro_paused ? "Resume" : "Pause",
+            snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_EXTINGUISHED) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle New Cycle\033[0m   "
-            "\033[38;2;160;160;160m[Q] Quit\033[0m");
+            "\033[38;2;160;160;160m[M] %s (%d%%)   [Q] Quit\033[0m",
+            snd_mode, snd_vol);
     } else {
         // Active LIT FOCUS
         if (g_is_dark_souls) {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[E]\033[0m \033[38;2;255;200;90mStoke\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
-                g_pomodoro_paused ? "Resume" : "Pause");
+                "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+                g_pomodoro_paused ? "Resume" : "Pause",
+                snd_mode, snd_vol);
         } else {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[F]\033[0m \033[38;2;255;200;90mWood\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [S] Skip   [Q] Quit\033[0m",
-                g_pomodoro_paused ? "Resume" : "Pause");
+                "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+                g_pomodoro_paused ? "Resume" : "Pause",
+                snd_mode, snd_vol);
         }
     }
 
@@ -4048,8 +4156,89 @@ static void present_frame(void) {
     }
 }
 
+static void play_bonfire_sound(void) {
+    if (!g_sound_enabled || g_sound_volume <= 0) return;
+
+    pid_t pid = fork();
+    if (pid < 0) return;
+
+    if (pid > 0) {
+        // Parent: wait for intermediate child (which exits immediately)
+        waitpid(pid, NULL, 0);
+        return;
+    }
+
+    // Intermediate child: fork grandchild and exit so parent is never blocked
+    pid_t pid2 = fork();
+    if (pid2 > 0) {
+        _exit(0);
+    }
+    if (pid2 < 0) {
+        _exit(1);
+    }
+
+    // Grandchild: completely detached from main terminal process
+    int audio_pipe[2];
+    if (pipe(audio_pipe) != 0) {
+        _exit(1);
+    }
+
+    pid_t player_pid = fork();
+    if (player_pid == 0) {
+        // Audio player process
+        close(audio_pipe[1]);
+        if (dup2(audio_pipe[0], STDIN_FILENO) < 0) {
+            _exit(1);
+        }
+        close(audio_pipe[0]);
+
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+
+        char vol_str[32];
+        snprintf(vol_str, sizeof(vol_str), "%.2f", (float)g_sound_volume / 100.0f);
+
+        // Try available audio players in order
+        execlp("pw-play", "pw-play", "--volume", vol_str, "-", (char *)NULL);
+        execlp("paplay", "paplay", "/dev/stdin", (char *)NULL);
+        execlp("aplay", "aplay", "-q", "-", (char *)NULL);
+        _exit(1);
+    }
+
+    if (player_pid < 0) {
+        close(audio_pipe[0]);
+        close(audio_pipe[1]);
+        _exit(1);
+    }
+
+    // Audio feeder process: stream embedded 16-bit WAV data into player pipe
+    close(audio_pipe[0]);
+    signal(SIGPIPE, SIG_IGN);
+
+    const unsigned char *data = assets_bonfire_original_16bit_wav;
+    size_t total = assets_bonfire_original_16bit_wav_len;
+    size_t sent = 0;
+    while (sent < total) {
+        ssize_t n = write(audio_pipe[1], data + sent, total - sent);
+        if (n <= 0) break;
+        sent += (size_t)n;
+    }
+    close(audio_pipe[1]);
+
+    waitpid(player_pid, NULL, 0);
+    _exit(0);
+}
+
 static void ignite_fireplace(bool is_rekindle) {
     if (g_fire_state == FIRE_STATE_LIT_FOCUS && !is_rekindle) return;
+
+    if (g_is_dark_souls) {
+        play_bonfire_sound();
+    }
 
     g_fire_state = FIRE_STATE_LIT_FOCUS;
     g_bonfire_lit = true;
@@ -4221,6 +4410,22 @@ static void handle_input(void) {
             g_pomodoro_elapsed = 0.0f;
             g_pomodoro_paused = false;
             init_scene();
+        } else if (ch == 'm' || ch == 'M') {
+            g_sound_enabled = !g_sound_enabled;
+            if (g_sound_enabled && g_sound_volume == 0) g_sound_volume = 50;
+            stop_ambient_sound();
+            update_ambient_audio();
+        } else if (ch == '[' || ch == '-') {
+            g_sound_volume -= 10;
+            if (g_sound_volume < 0) g_sound_volume = 0;
+            stop_ambient_sound();
+            update_ambient_audio();
+        } else if (ch == ']' || ch == '+' || ch == '=') {
+            g_sound_volume += 10;
+            if (g_sound_volume > 100) g_sound_volume = 100;
+            g_sound_enabled = true;
+            stop_ambient_sound();
+            update_ambient_audio();
         } else if (ch == 'q' || ch == 'Q') {
             g_running = 0;
         }
@@ -4380,14 +4585,70 @@ static void run_benchmark_suite(int frames) {
     printf("===================================================================================================\n\n");
 }
 
+static void get_config_path(char *out_path, size_t max_len) {
+    const char *home = getenv("HOME");
+    if (!home || home[0] == '\0') {
+        home = ".";
+    }
+    snprintf(out_path, max_len, "%s/.fireplace_conf", home);
+}
+
+static void load_user_config(int *style, int *focus_min, int *short_break_min, int *long_break_min, int *sessions, int *volume) {
+    char path[1024];
+    get_config_path(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    char line[256];
+    while (fgets(line, sizeof(line), f)) {
+        int val = 0;
+        if (sscanf(line, "style=%d", &val) == 1) {
+            *style = (val == 1) ? 1 : 0;
+        } else if (sscanf(line, "focus_min=%d", &val) == 1) {
+            if (val >= 1 && val <= 180) *focus_min = val;
+        } else if (sscanf(line, "short_break_min=%d", &val) == 1) {
+            if (val >= 1 && val <= 60) *short_break_min = val;
+        } else if (sscanf(line, "long_break_min=%d", &val) == 1) {
+            if (val >= 1 && val <= 120) *long_break_min = val;
+        } else if (sscanf(line, "sessions=%d", &val) == 1) {
+            if (val >= 1 && val <= 24) *sessions = val;
+        } else if (sscanf(line, "volume=%d", &val) == 1) {
+            if (val >= 0 && val <= 100) *volume = val;
+        }
+    }
+    fclose(f);
+}
+
+static void save_user_config(int style, int focus_min, int short_break_min, int long_break_min, int sessions, int volume) {
+    char path[1024];
+    get_config_path(path, sizeof(path));
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+
+    fprintf(f, "style=%d\n", style);
+    fprintf(f, "focus_min=%d\n", focus_min);
+    fprintf(f, "short_break_min=%d\n", short_break_min);
+    fprintf(f, "long_break_min=%d\n", long_break_min);
+    fprintf(f, "sessions=%d\n", sessions);
+    fprintf(f, "volume=%d\n", volume);
+    fclose(f);
+}
+
 static bool run_setup_menu(void) {
-    int selected = 0; // 0: Style, 1: Focus, 2: Short Break, 3: Long Break, 4: Sessions
+    int selected = 0; // 0: Style, 1: Focus, 2: Short Break, 3: Long Break, 4: Sessions, 5: Volume
     bool in_menu = true;
 
     int focus_min = (int)(g_focus_duration / 60.0f);
     int short_break_min = (int)(g_short_break_duration / 60.0f);
     int long_break_min = (int)(g_long_break_duration / 60.0f);
     int sessions = g_sessions_before_long_break;
+    int style = g_is_dark_souls ? 1 : 0;
+    int volume = g_sound_volume;
+
+    load_user_config(&style, &focus_min, &short_break_min, &long_break_min, &sessions, &volume);
+    g_is_dark_souls = (style == 1);
+    g_sound_volume = volume;
+    g_sound_enabled = (volume > 0);
 
     char menu_buf[8192];
     struct timespec ts = {0, 25000000L}; // 40 FPS
@@ -4408,42 +4669,46 @@ static bool run_setup_menu(void) {
                 if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
                     if (seq[0] == '[') {
                         if (seq[1] == 'A') { // Up
-                            selected = (selected + 4) % 5;
+                            selected = (selected + 5) % 6;
                         } else if (seq[1] == 'B') { // Down
-                            selected = (selected + 1) % 5;
+                            selected = (selected + 1) % 6;
                         } else if (seq[1] == 'D') { // Left
                             if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
                             else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
                             else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
                             else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
                             else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
+                            else if (selected == 5) { volume = (volume >= 10) ? volume - 10 : 0; }
                         } else if (seq[1] == 'C') { // Right
                             if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
                             else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
                             else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
                             else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
                             else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
+                            else if (selected == 5) { volume = (volume <= 90) ? volume + 10 : 100; }
                         }
                     }
                 }
-            } else if (ch >= '1' && ch <= '5') {
+            } else if (ch >= '1' && ch <= '6') {
                 selected = ch - '1';
             } else if (ch == 'w' || ch == 'W' || ch == 'k' || ch == 'K') {
-                selected = (selected + 4) % 5;
+                selected = (selected + 5) % 6;
             } else if (ch == 's' || ch == 'S' || ch == 'j' || ch == 'J') {
-                selected = (selected + 1) % 5;
+                selected = (selected + 1) % 6;
             } else if (ch == 'a' || ch == 'A' || ch == 'h' || ch == '-' || ch == '_') {
                 if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
                 else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
                 else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
                 else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
                 else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
+                else if (selected == 5) { volume = (volume >= 10) ? volume - 10 : 0; }
             } else if (ch == 'd' || ch == 'D' || ch == 'l' || ch == '+' || ch == '=') {
                 if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
                 else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
                 else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
                 else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
                 else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
+                else if (selected == 5) { volume = (volume <= 90) ? volume + 10 : 100; }
             } else if (ch == '\n' || ch == '\r' || ch == ' ') {
                 in_menu = false;
                 break;
@@ -4456,7 +4721,7 @@ static bool run_setup_menu(void) {
         if (!in_menu) break;
 
         int box_w = 66;
-        int box_h = 16;
+        int box_h = 17;
         int start_r = (g_term_rows - box_h) / 2;
         if (start_r < 1) start_r = 1;
         int start_c = (g_term_cols - box_w) / 2;
@@ -4489,71 +4754,88 @@ static bool run_setup_menu(void) {
         // Row 0: Style
         const char *style_str = g_is_dark_souls ? "Dark Souls Bonfire" : "Classic Wood Fireplace";
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m║ %s[1] Fireplace Style:    ◄ %-23s ►%s ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
             start_r + 5, start_c,
-            (selected == 0) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
-            style_str,
-            (selected == 0) ? "\033[0m\033[48;2;16;10;8m" : "");
+            (selected == 0) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 0) ? "▶ " : "  ",
+            "[1] Fireplace Style:",
+            style_str);
 
         // Row 1: Focus
         char foc_str[32];
         snprintf(foc_str, sizeof(foc_str), "%d min", focus_min);
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m║ %s[2] Focus Duration:     ◄ %-23s ►%s ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
             start_r + 6, start_c,
-            (selected == 1) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
-            foc_str,
-            (selected == 1) ? "\033[0m\033[48;2;16;10;8m" : "");
+            (selected == 1) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 1) ? "▶ " : "  ",
+            "[2] Focus Duration:",
+            foc_str);
 
         // Row 2: Short Break
         char sb_str[32];
         snprintf(sb_str, sizeof(sb_str), "%d min", short_break_min);
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m║ %s[3] Short Break:        ◄ %-23s ►%s ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
             start_r + 7, start_c,
-            (selected == 2) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
-            sb_str,
-            (selected == 2) ? "\033[0m\033[48;2;16;10;8m" : "");
+            (selected == 2) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 2) ? "▶ " : "  ",
+            "[3] Short Break:",
+            sb_str);
 
         // Row 3: Long Break
         char lb_str[32];
         snprintf(lb_str, sizeof(lb_str), "%d min", long_break_min);
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m║ %s[4] Long Break:         ◄ %-23s ►%s ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
             start_r + 8, start_c,
-            (selected == 3) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
-            lb_str,
-            (selected == 3) ? "\033[0m\033[48;2;16;10;8m" : "");
+            (selected == 3) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 3) ? "▶ " : "  ",
+            "[4] Long Break:",
+            lb_str);
 
         // Row 4: Sessions
         char sess_str[32];
         snprintf(sess_str, sizeof(sess_str), "%d sessions", sessions);
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m║ %s[5] Sessions / Cycle:   ◄ %-23s ►%s ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
             start_r + 9, start_c,
-            (selected == 4) ? "\033[1;38;2;255;235;130m\033[48;2;55;25;12m▶ " : "\033[0m\033[48;2;16;10;8m\033[38;2;200;190;175m  ",
-            sess_str,
-            (selected == 4) ? "\033[0m\033[48;2;16;10;8m" : "");
+            (selected == 4) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 4) ? "▶ " : "  ",
+            "[5] Sessions / Cycle:",
+            sess_str);
+
+        // Row 5: Sound Volume
+        char vol_str[32];
+        if (volume == 0) snprintf(vol_str, sizeof(vol_str), "Mute (0%%)");
+        else snprintf(vol_str, sizeof(vol_str), "%d%%", volume);
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m║%s %s%-21s   ◄ %-23s ►          \033[0m\033[48;2;16;10;8m║\033[0m",
+            start_r + 10, start_c,
+            (selected == 5) ? "\033[48;2;55;25;12m\033[1;38;2;255;235;130m" : "\033[48;2;16;10;8m\033[38;2;200;190;175m",
+            (selected == 5) ? "▶ " : "  ",
+            "[6] Sound Volume:",
+            vol_str);
 
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
             "\033[%d;%dH\033[48;2;16;10;8m║                                                                ║\033[0m",
-            start_r + 10, start_c);
-
-        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╠════════════════════════════════════════════════════════════════╣\033[0m",
             start_r + 11, start_c);
 
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;220;190;140m║ [↑/↓ or 1-5] Navigate  [←/→] Adjust  [Enter/Space] Start       ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╠════════════════════════════════════════════════════════════════╣\033[0m",
             start_r + 12, start_c);
 
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;160;140;120m║ [Q] Exit                                                       ║\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;220;190;140m║ [↑/↓ or 1-6] Navigate  [←/→] Adjust  [Enter/Space] Start       ║\033[0m",
             start_r + 13, start_c);
 
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
-            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╚════════════════════════════════════════════════════════════════╝\033[0m",
+            "\033[%d;%dH\033[48;2;16;10;8m\033[38;2;160;140;120m║ [Q] Exit                                                       ║\033[0m",
             start_r + 14, start_c);
+
+        len += snprintf(menu_buf + len, sizeof(menu_buf) - len,
+            "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m╚════════════════════════════════════════════════════════════════╝\033[0m",
+            start_r + 15, start_c);
 
         safe_write(STDOUT_FILENO, menu_buf, len);
         nanosleep(&ts, NULL);
@@ -4561,7 +4843,10 @@ static bool run_setup_menu(void) {
 
     if (!g_running) return false;
 
-    // Apply configuration
+    // Apply configuration and persist to ~/.fireplace_conf
+    g_sound_volume = volume;
+    g_sound_enabled = (volume > 0);
+    save_user_config(g_is_dark_souls ? 1 : 0, focus_min, short_break_min, long_break_min, sessions, volume);
     g_focus_duration = (float)focus_min * 60.0f;
     g_short_break_duration = (float)short_break_min * 60.0f;
     g_long_break_duration = (float)long_break_min * 60.0f;
@@ -4764,6 +5049,7 @@ int main(int argc, char **argv) {
 
         handle_input();
         update_simulation();
+        update_ambient_audio();
         render_scene();
         present_frame();
 
@@ -4771,6 +5057,8 @@ int main(int argc, char **argv) {
         ts.tv_nsec = 24000000L; // ~40 FPS
         nanosleep(&ts, NULL);
     }
+
+    stop_ambient_sound();
 
     // Save history if closed prematurely after at least 1 minute
     if (!g_cycle_logged) {
