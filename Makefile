@@ -12,4 +12,17 @@ $(TARGET): fireplace.c
 clean:
 	rm -f $(TARGET) *.o *.ppm
 
-.PHONY: all clean
+PREFIX ?= $(HOME)/.local
+BINDIR ?= $(PREFIX)/bin
+
+install: $(TARGET)
+	mkdir -p $(DESTDIR)$(BINDIR)
+	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
+	ln -sf $(TARGET) $(DESTDIR)$(BINDIR)/bonfire
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
+	rm -f $(DESTDIR)$(BINDIR)/bonfire
+
+.PHONY: all clean install uninstall
+
