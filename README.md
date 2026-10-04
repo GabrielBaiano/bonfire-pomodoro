@@ -1,8 +1,9 @@
 # bonfire-pomodoro
 
 A Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor ASCII art directly in your Linux terminal. Single C99 source file, zero external dependencies beyond libc and libm.
-
-![Dark Souls Bonfire](docs/media/dark_souls_bonfire.gif)
+<p align="center">
+  <img src="docs/media/dark_souls_bonfire.gif" alt="Dark Souls Bonfire" width="100%">
+</p>
 
 ## The Experience
 
@@ -69,13 +70,13 @@ bonfire --fast
 | `Left Click + Drag` | Orbit camera yaw and pitch in real-time 3D |
 | `Mouse Wheel` | Tilt camera pitch (or `↑`/`↓`) |
 | `[P]` | Pause / resume current Pomodoro phase |
-| `[S]` | Skip phase (Focus → Rest → Next Focus) |
+| `[S]` | Skip phase (prompts confirmation dialog) |
 | `[M]` | Mute / unmute ambient audio (keeps subtle alert chime) |
 | `[` / `]` or `-` / `+` | Decrease / increase sound volume (10% steps) |
 | `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
 | `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
 | `r` | Rekindle / restart session from unlit state |
-| `q` | Quit session |
+| `q` | Quit session (prompts confirmation dialog) |
 
 ## Technical Highlights
 
