@@ -4271,12 +4271,12 @@ static void play_bonfire_sound(void) {
 
 static void play_alert_sound(void) {
     // When muted or sound volume is 0, do NOT silence the phase completion alert!
-    // Keep it at a subtle minimum level (~0.08 perceptual gain) so the user knows time ended.
-    float vol = 0.08f;
+    // Keep it at a subtle minimal floor (~0.025 gain, ~15% perceptual) so the user knows time ended.
+    float vol = 0.025f;
     if (g_sound_enabled && g_sound_volume > 0) {
         float v_norm = (float)g_sound_volume / 100.0f;
         vol = v_norm * v_norm;
-        if (vol < 0.08f) vol = 0.08f;
+        if (vol < 0.025f) vol = 0.025f;
     }
     play_oneshot_sound_volume(assets_item_discovery_wav, assets_item_discovery_wav_len, vol);
 }
