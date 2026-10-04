@@ -1,4 +1,5 @@
 fireplace
+bonfire
 *.o
 *.ppm
 __pycache__/

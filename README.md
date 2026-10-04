@@ -1,50 +1,66 @@
-# fireplace-experiment
+# bonfire-pomodoro
 
-A real-time physical bonfire Pomodoro timer rendered as 3D pixel art in the terminal.
-
-Focus while the campfire burns. Each session ignites kindling, transitions into a roaring teepee fire, snaps and settles into glowing ember coals, and slowly extinguishes when your focus time ends. Completed sessions are logged to keep track of your focus history.
-
-![Campfire Turntable](docs/media/fireplace_turntable.gif)
-
-## How It Works
-
-- **Pomodoro Cycle**: By default, a session runs for 50 minutes (standard natural firewood burn). You can set custom durations like `--time 25` for classic Pomodoro sessions.
-- **Dynamic Physical Combustion**: Logs undergo 1D thermal diffusion along the wood grain, dry out moisture, char, fracture at weakened stress points, and fall with ragdoll gravity into the coal bed.
-- **Randomized Wood Species**: Randomizes between Carvalho (Oak), Pinho (Pine), Bétula (Birch), and Cerejeira (Cherry), each with unique palettes, crackle frequency, and burn properties.
-- **Focus History**: Finished sessions are automatically logged to `~/.bonfire_history.json`.
-- **ANSI Half-Block Pixel Art**: 24-bit TrueColor characters (`▀`) rendered at 60 FPS with native terminal background transparency.
-
-## Usage
-
-### Quick Start
-
-```bash
-make
-./fireplace
-```
-
-### CLI Options
-
-```bash
-# Start a 25-minute Pomodoro session
-./fireplace --time 25
-
-# Dark Souls Coiled Sword Bonfire mode
-./fireplace --souls --time 25
-
-# Specify a wood species (carvalho, pinho, betula, cerejeira)
-./fireplace --wood pinho --time 45
-
-# View past completed focus sessions
-./fireplace --history
-
-# Fast preview mode (30x speed)
-./fireplace --fast
-```
+A Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor ASCII art directly in your Linux terminal. Single C99 source file, zero external dependencies beyond libc and libm.
 
 ![Dark Souls Bonfire](docs/media/dark_souls_bonfire.gif)
 
-## Controls
+## The Experience
+
+- **Kindle the Flame**: Press `[E]` to light the unlit bonfire. The coiled sword heats up, sparks burst in a radial explosion, and a roaring fire erupts around the skull bone mound.
+- **Ambient Sound**: Authentic crackling bonfire audio streams directly into PipeWire / PulseAudio / ALSA via embedded 16-bit PCM with seamless crossfading.
+- **Cycle Transitions**: When your focus session ends, the authentic Dark Souls *Item Discovery* chime rings, an on-screen banner appears, and the fire settles into smoldering embers for your break.
+- **Desktop Notifications**: Background desktop alerts via `notify-send` and terminal bell (`\a`) keep you on track even when the window is behind your editor or on another workspace.
+- **Continuous 360° Orbit**: Hit `Space` at any moment to toggle a continuous turntable camera loop orbiting the 3D coiled sword and flame.
+- **Smart Mute**: Muting (`[M]`) silences ambient crackling while keeping the end-of-cycle chime audible at a subtle, non-intrusive volume (~15%).
+
+## Quick Start
+
+### Build & Run
+
+```bash
+git clone https://github.com/GabrielBaiano/bonfire-pomodoro.git
+cd bonfire-pomodoro
+make
+./bonfire
+```
+
+### Install Globally
+
+Install `bonfire` (and `fireplace` alias) to `~/.local/bin`:
+
+```bash
+make install
+```
+
+Make sure `~/.local/bin` is in your `$PATH`. You can then launch it from anywhere simply by typing:
+
+```bash
+bonfire
+```
+
+## CLI Usage
+
+```bash
+# Interactive setup menu (style, intervals, volume)
+bonfire
+
+# Direct launch into Dark Souls Bonfire mode
+bonfire --souls
+
+# Set custom focus duration (in minutes)
+bonfire --souls --time 25
+
+# Classic wood fireplace mode with combustion physics
+bonfire --wood carvalho --time 45
+
+# View completed Pomodoro session logs
+bonfire --history
+
+# Fast preview mode (30x simulation speed)
+bonfire --fast
+```
+
+## Interactive Controls
 
 | Key | Action |
 | --- | --- |
@@ -52,23 +68,22 @@ make
 | `Space` (or `g` / `t`) | Toggle continuous 360° turntable rotation loop |
 | `[P]` | Pause / resume current Pomodoro phase |
 | `[S]` | Skip phase (Focus → Rest → Next Focus) |
-| `[M]` | Mute / unmute audio |
+| `[M]` | Mute / unmute ambient audio (keeps subtle alert chime) |
 | `[` / `]` or `-` / `+` | Decrease / increase sound volume (10% steps) |
 | `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
 | `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
 | `r` | Rekindle / restart session from unlit state |
 | `q` | Quit session |
 
-## Features & Simulation Details
+## Technical Highlights
 
-- **Startup Setup Menu**: Interactive pre-launch TUI to pick Fireplace style, focus duration, short/long breaks, cycles, and volume. Settings auto-persist to `~/.fireplace_conf`.
-- **Authentic Audio Engine**: Seamless raw PCM streaming via PipeWire/ALSA with zero frame drops. Includes authentic Dark Souls bonfire ignition & loop (filtered of background choir hum) and realistic wood crackle.
-- **3D Stone Hearth & Coiled Sword**: Procedural helical geometry and skull bone mound rendered with per-object shaders.
-- **Ragdoll Wood Physics**: Burning logs snap unevenly when central mass is exhausted and drop onto the hearth floor with physical impulse and bounce restitution.
-- **Turntable & Snapshot Exporter**: Headless rendering to PPM/GIF for captures (`--snapshot` and `--turntable`).
+- **3D Raymarching in ANSI**: Procedural coiled sword (helical SDF geometry), skull mound, and stone hearth rendered using character half-block sub-pixels (`▀`) with 24-bit TrueColor at 60 FPS.
+- **Physical Combustion Simulation**: Convective cellular automata fire with thermal diffusion along wood grain, moisture evaporation, charring, and physical log breakage.
+- **Embedded Audio Engine**: Embedded 16-bit 22.05 kHz PCM streams directly through user-space pipes into system sound servers without linking SDL, OpenAL, or external sound libraries.
+- **Config & History Persistence**: Settings persist to `~/.fireplace_conf` and completed focus intervals log to `~/.bonfire_history.json`.
 
-## Documentation & Engineering Blog
+## Documentation & Blog
 
-- 📖 **[BLOG_POST.md](BLOG_POST.md)**: An in-depth technical write-up (in the style of [Simon Willison's weblog](https://simonwillison.net/)) breaking down the 3D raymarching math, G-buffer cel-shading outlines, cellular automata fire convection, ANSI half-block sub-pixels, and raw PCM streaming audio architecture.
-- 📐 **[docs/architecture.md](docs/architecture.md)**: Deep technical notes on the raycast shader, combustion equations, and geometry pipeline.
+- [BLOG_POST.md](BLOG_POST.md): In-depth write-up covering the 3D raymarching pipeline, cellular automata convection, G-buffer outlines, and PCM audio streaming architecture.
+- [docs/architecture.md](docs/architecture.md): Technical notes on the raycast shader, thermal balance equations, and ragdoll log physics.
 
