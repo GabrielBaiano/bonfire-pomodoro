@@ -433,10 +433,17 @@ typedef enum {
     BANNER_EXTINGUISHED = 4
 } BannerType;
 
+typedef enum {
+    MODAL_NONE = 0,
+    MODAL_CONFIRM_QUIT = 1,
+    MODAL_CONFIRM_SKIP = 2
+} ModalType;
+
 // Dark Souls Coiled Sword (Espada Espiral) & Bone Pile
 static bool g_is_dark_souls = false;
 static FireState g_fire_state = FIRE_STATE_UNLIT;
 static BannerType g_banner_type = BANNER_NONE;
+static ModalType g_modal_active = MODAL_NONE;
 static bool g_bonfire_lit = false;
 static float g_ignition_timer = 0.0f;
 static float g_banner_timer = 0.0f;
@@ -1963,7 +1970,7 @@ static void update_simulation(void) {
     float real_dt = 0.025f * g_time_scale;
 
     // Pomodoro lifecycle progression
-    if (!g_pomodoro_paused) {
+    if (!g_pomodoro_paused && g_modal_active == MODAL_NONE) {
         if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
             g_pomodoro_elapsed += real_dt;
             if (g_pomodoro_elapsed >= g_focus_duration) {
@@ -2011,7 +2018,7 @@ static void update_simulation(void) {
     }
 
     // Auto-replenish wood during active focus in standard fireplace mode
-    if (!g_is_dark_souls && g_fire_state == FIRE_STATE_LIT_FOCUS && !g_pomodoro_paused) {
+    if (!g_is_dark_souls && g_fire_state == FIRE_STATE_LIT_FOCUS && !g_pomodoro_paused && g_modal_active == MODAL_NONE) {
         g_auto_wood_check_timer += real_dt;
         if (g_auto_wood_check_timer >= 2.0f) {
             g_auto_wood_check_timer = 0.0f;
@@ -2030,16 +2037,16 @@ static void update_simulation(void) {
     // Full lifecycle (0 to 3000s) maps directly to g_focus_duration real seconds
     float rate_mult = (g_focus_duration > 0.0f) ? (3000.0f / g_focus_duration) : 1.0f;
     float dt = 0.025f * g_time_scale * rate_mult;
-    if (g_fire_state == FIRE_STATE_LIT_FOCUS || g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+    if ((g_fire_state == FIRE_STATE_LIT_FOCUS || g_fire_state == FIRE_STATE_SMOLDERING_REST) && g_modal_active == MODAL_NONE) {
         g_sim_time += dt;
     }
     g_anim_time += 0.025f;
 
-    if (g_banner_timer > 0.0f) {
+    if (g_banner_timer > 0.0f && g_modal_active == MODAL_NONE) {
         g_banner_timer -= 0.025f * g_time_scale;
         if (g_banner_timer < 0.0f) g_banner_timer = 0.0f;
     }
-    if (g_ignition_timer > 0.0f) {
+    if (g_ignition_timer > 0.0f && g_modal_active == MODAL_NONE) {
         g_ignition_timer += 0.025f * g_time_scale;
         if (g_ignition_timer > 3.0f) g_ignition_timer = 3.0f;
     }
@@ -3884,6 +3891,134 @@ static void render_scene(void) {
     }
 }
 
+static int visible_len(const char *s) {
+    if (!s) return 0;
+    int vlen = 0;
+    bool in_esc = false;
+    for (int i = 0; s[i] != '\0'; i++) {
+        if (s[i] == '\033') {
+            in_esc = true;
+        } else if (in_esc) {
+            if ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 'a' && s[i] <= 'z') || s[i] == '~') {
+                in_esc = false;
+            }
+        } else {
+            unsigned char c = (unsigned char)s[i];
+            if ((c & 0xC0) != 0x80) {
+                vlen++;
+            }
+        }
+    }
+    return vlen;
+}
+
+static void render_modal_border(char *buf, int buf_cap, int *buf_len, int row, int start_col, int inner_w,
+                                const char *left, const char *mid, const char *right) {
+    if (!buf || *buf_len >= buf_cap - 256) return;
+    int n = snprintf(buf + *buf_len, buf_cap - *buf_len,
+                     "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m%s",
+                     row, start_col, left);
+    if (n > 0) *buf_len += n;
+
+    for (int i = 0; i < inner_w; i++) {
+        if (*buf_len >= buf_cap - 64) break;
+        n = snprintf(buf + *buf_len, buf_cap - *buf_len, "%s", mid);
+        if (n > 0) *buf_len += n;
+    }
+
+    if (*buf_len < buf_cap - 32) {
+        n = snprintf(buf + *buf_len, buf_cap - *buf_len, "%s\033[0m", right);
+        if (n > 0) *buf_len += n;
+    }
+}
+
+static void render_modal_row(char *buf, int buf_cap, int *buf_len, int row, int start_col, int inner_w,
+                             const char *content) {
+    if (!buf || *buf_len >= buf_cap - 256) return;
+    int vlen = visible_len(content);
+    int pad_left = 0;
+    int pad_right = 0;
+    if (inner_w > vlen) {
+        pad_left = (inner_w - vlen) / 2;
+        pad_right = inner_w - vlen - pad_left;
+    }
+
+    int n = snprintf(buf + *buf_len, buf_cap - *buf_len,
+                     "\033[%d;%dH\033[48;2;16;10;8m\033[1;38;2;220;140;40m║\033[48;2;16;10;8m%*s%s\033[48;2;16;10;8m%*s\033[1;38;2;220;140;40m║\033[0m",
+                     row, start_col,
+                     pad_left, "",
+                     content ? content : "",
+                     pad_right, "");
+    if (n > 0) *buf_len += n;
+}
+
+static void render_confirmation_modal(char *buf, int buf_cap, int *buf_len, int text_rows, int pixel_w) {
+    if (g_modal_active == MODAL_NONE) return;
+
+    int modal_w = 56;
+    if (modal_w > pixel_w - 4) modal_w = pixel_w - 4;
+    if (modal_w < 36) modal_w = 36;
+    int inner_w = modal_w - 2;
+
+    int modal_h = 9;
+    int start_r = (text_rows - modal_h) / 2 + 1;
+    if (start_r < 2) start_r = 2;
+    int start_c = (pixel_w - modal_w) / 2 + 1;
+    if (start_c < 1) start_c = 1;
+
+    const char *title;
+    char msg1[128];
+    char msg2[128];
+    char buttons[256];
+
+    if (g_modal_active == MODAL_CONFIRM_QUIT) {
+        title = "\033[1;38;2;255;210;110mABANDON THE FLAME?\033[0m";
+        snprintf(msg1, sizeof(msg1), "\033[1;37mAre you sure you want to quit?\033[0m");
+        if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+            snprintf(msg2, sizeof(msg2), "\033[38;2;220;140;60mCurrent focus progress will be lost.\033[0m");
+        } else {
+            snprintf(msg2, sizeof(msg2), "\033[38;2;180;160;140mYour flame will be extinguished.\033[0m");
+        }
+        if (inner_w >= 44) {
+            snprintf(buttons, sizeof(buttons),
+                     "\033[1;38;2;255;215;100m[Y / Enter]\033[0m \033[38;2;240;220;200mQuit\033[0m          \033[1;38;2;200;160;100m[N / Esc]\033[0m \033[38;2;240;220;200mCancel\033[0m");
+        } else {
+            snprintf(buttons, sizeof(buttons),
+                     "\033[1;38;2;255;215;100m[Y]\033[0m \033[38;2;240;220;200mQuit\033[0m     \033[1;38;2;200;160;100m[N]\033[0m \033[38;2;240;220;200mCancel\033[0m");
+        }
+    } else { // MODAL_CONFIRM_SKIP
+        title = "\033[1;38;2;255;210;110mSKIP POMODORO PHASE?\033[0m";
+        if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+            snprintf(msg1, sizeof(msg1), "\033[1;37mSkip focus session and enter rest?\033[0m");
+            snprintf(msg2, sizeof(msg2), "\033[38;2;220;140;60mCompleted focus count will increase.\033[0m");
+        } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+            snprintf(msg1, sizeof(msg1), "\033[1;37mEnd rest early and reignite flame?\033[0m");
+            snprintf(msg2, sizeof(msg2), "\033[38;2;220;140;60mNext focus session will begin now.\033[0m");
+        } else {
+            snprintf(msg1, sizeof(msg1), "\033[1;37mKindle bonfire and begin focus?\033[0m");
+            snprintf(msg2, sizeof(msg2), "\033[38;2;220;140;60mTimer will begin counting down.\033[0m");
+        }
+        if (inner_w >= 44) {
+            snprintf(buttons, sizeof(buttons),
+                     "\033[1;38;2;255;215;100m[Y / Enter]\033[0m \033[38;2;240;220;200mSkip\033[0m          \033[1;38;2;200;160;100m[N / Esc]\033[0m \033[38;2;240;220;200mCancel\033[0m");
+        } else {
+            snprintf(buttons, sizeof(buttons),
+                     "\033[1;38;2;255;215;100m[Y]\033[0m \033[38;2;240;220;200mSkip\033[0m     \033[1;38;2;200;160;100m[N]\033[0m \033[38;2;240;220;200mCancel\033[0m");
+        }
+    }
+
+    int r = start_r;
+    render_modal_border(buf, buf_cap, buf_len, r++, start_c, inner_w, "╔", "═", "╗");
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, title);
+    render_modal_border(buf, buf_cap, buf_len, r++, start_c, inner_w, "╠", "═", "╣");
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, "");
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, msg1);
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, msg2);
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, "");
+    render_modal_row(buf, buf_cap, buf_len, r++, start_c, inner_w, buttons);
+    render_modal_border(buf, buf_cap, buf_len, r++, start_c, inner_w, "╚", "═", "╝");
+}
+
 static int format_frame_buffer(char *buf, int buf_cap) {
     if (!buf || buf_cap <= 0) return 0;
     int buf_len = 0;
@@ -4051,7 +4186,11 @@ static int format_frame_buffer(char *buf, int buf_cap) {
     const char *snd_mode = (!g_sound_enabled || g_sound_volume == 0) ? "Muted" : "Sound";
     int snd_vol = (!g_sound_enabled) ? 0 : g_sound_volume;
 
-    if (g_fire_state == FIRE_STATE_UNLIT) {
+    if (g_modal_active != MODAL_NONE) {
+        snprintf(footer_buf, sizeof(footer_buf),
+            "\033[1;38;2;255;215;100m[Y / Enter]\033[0m \033[38;2;240;220;200mConfirm\033[0m   "
+            "\033[1;38;2;200;160;100m[N / Esc]\033[0m \033[38;2;240;220;200mCancel\033[0m");
+    } else if (g_fire_state == FIRE_STATE_UNLIT) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
             "\033[38;2;160;160;160m[Space] 360°   [M] %s   [-/+] %d%%   [Q] Quit\033[0m",
@@ -4166,6 +4305,13 @@ static int format_frame_buffer(char *buf, int buf_cap) {
                 banner_row + 2, start_col, r_acc, g_acc, b_acc);
             if (n > 0) buf_len += n;
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // CONFIRMATION MODAL OVERLAY (Quit or Skip confirmation)
+    // -------------------------------------------------------------------------
+    if (g_modal_active != MODAL_NONE) {
+        render_confirmation_modal(buf, buf_cap, &buf_len, text_rows, g_pixel_w);
     }
 
     if (buf_len >= buf_cap) buf_len = buf_cap - 1;
@@ -4429,9 +4575,25 @@ static void handle_input(void) {
         if (ch == '\033') {
             char seq[64];
             int slen = read_escape_sequence(seq, sizeof(seq));
-            if (slen == 0) continue;
+            if (slen == 0) {
+                // Standalone ESC pressed
+                if (g_modal_active != MODAL_NONE) {
+                    g_modal_active = MODAL_NONE;
+                }
+                continue;
+            }
 
             if (seq[0] == '[') {
+                if (strcmp(seq, "[200~") == 0) {
+                    drain_bracketed_paste();
+                    continue;
+                }
+
+                // If modal is active, suppress arrow navigation and mouse interaction
+                if (g_modal_active != MODAL_NONE) {
+                    continue;
+                }
+
                 if (seq[1] == 'A') { // Up arrow -> pitch up
                     g_cam_pitch += 0.06f;
                     if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
@@ -4442,8 +4604,6 @@ static void handle_input(void) {
                     g_cam_yaw += 0.08f;
                 } else if (seq[1] == 'D') { // Left arrow -> yaw left
                     g_cam_yaw -= 0.08f;
-                } else if (strcmp(seq, "[200~") == 0) {
-                    drain_bracketed_paste();
                 } else if (seq[1] == '<') {
                     // SGR mouse event: \033[<btn;col;rowM or m
                     int btn = 0, mx = 0, my = 0;
@@ -4508,7 +4668,47 @@ static void handle_input(void) {
                 }
             }
             continue;
-        } else if (ch == 'p' || ch == 'P') {
+        }
+
+        // Active modal interception: [Y/Enter] confirms, [N/Esc/Q] cancels
+        if (g_modal_active != MODAL_NONE) {
+            if (ch == 'y' || ch == 'Y' || ch == '\n' || ch == '\r') {
+                if (g_modal_active == MODAL_CONFIRM_QUIT) {
+                    g_running = 0;
+                    g_modal_active = MODAL_NONE;
+                } else if (g_modal_active == MODAL_CONFIRM_SKIP) {
+                    play_alert_sound();
+                    if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
+                        g_pomodoro_elapsed = 0.0f;
+                        g_pomodoro_cycles_done++;
+                        if (g_sessions_before_long_break > 0 && (g_pomodoro_cycles_done % g_sessions_before_long_break == 0)) {
+                            g_is_long_break = true;
+                            g_rest_duration = g_long_break_duration;
+                            g_banner_type = BANNER_LONG_REST;
+                        } else {
+                            g_is_long_break = false;
+                            g_rest_duration = g_short_break_duration;
+                            g_banner_type = BANNER_REST;
+                        }
+                        g_banner_timer = 3.5f;
+                        g_fire_state = FIRE_STATE_SMOLDERING_REST;
+                        send_system_notification("Bonfire Pomodoro", g_is_long_break ? "Skipped to Long Rest." : "Skipped to Short Rest.");
+                    } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                        ignite_fireplace(true);
+                        send_system_notification("Bonfire Pomodoro", "Rekindled! Beginning focus session.");
+                    } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                        ignite_fireplace(false);
+                        send_system_notification("Bonfire Pomodoro", "Kindled! Beginning focus session.");
+                    }
+                    g_modal_active = MODAL_NONE;
+                }
+            } else if (ch == 'n' || ch == 'N' || ch == 'q' || ch == 'Q') {
+                g_modal_active = MODAL_NONE;
+            }
+            continue;
+        }
+
+        if (ch == 'p' || ch == 'P') {
             g_pomodoro_paused = !g_pomodoro_paused;
         } else if (ch == 'a' || ch == 'A' || ch == 'h') {
             g_cam_yaw -= 0.08f;
@@ -4532,30 +4732,7 @@ static void handle_input(void) {
                 if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
             }
         } else if (ch == 's' || ch == 'S' || ch == 'n' || ch == 'N') {
-            // Skip current Pomodoro phase
-            play_alert_sound();
-            if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
-                g_pomodoro_elapsed = 0.0f;
-                g_pomodoro_cycles_done++;
-                if (g_sessions_before_long_break > 0 && (g_pomodoro_cycles_done % g_sessions_before_long_break == 0)) {
-                    g_is_long_break = true;
-                    g_rest_duration = g_long_break_duration;
-                    g_banner_type = BANNER_LONG_REST;
-                } else {
-                    g_is_long_break = false;
-                    g_rest_duration = g_short_break_duration;
-                    g_banner_type = BANNER_REST;
-                }
-                g_banner_timer = 3.5f;
-                g_fire_state = FIRE_STATE_SMOLDERING_REST;
-                send_system_notification("Bonfire Pomodoro", g_is_long_break ? "Skipped to Long Rest." : "Skipped to Short Rest.");
-            } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
-                ignite_fireplace(true);
-                send_system_notification("Bonfire Pomodoro", "Rekindled! Beginning focus session.");
-            } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
-                ignite_fireplace(false);
-                send_system_notification("Bonfire Pomodoro", "Kindled! Beginning focus session.");
-            }
+            g_modal_active = MODAL_CONFIRM_SKIP;
         } else if (ch == 'j' || ch == 'J' || ch == 'z' || ch == 'Z') {
             g_cam_pitch -= 0.06f;
             if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
@@ -4629,7 +4806,7 @@ static void handle_input(void) {
             }
             sync_volume_config();
         } else if (ch == 'q' || ch == 'Q') {
-            g_running = 0;
+            g_modal_active = MODAL_CONFIRM_QUIT;
         }
     }
 }
