@@ -81,9 +81,7 @@ bonfire --fast
 - **Physical Combustion Simulation**: Convective cellular automata fire with thermal diffusion along wood grain, moisture evaporation, charring, and physical log breakage.
 - **Embedded Audio Engine**: Embedded 16-bit 22.05 kHz PCM streams directly through user-space pipes into system sound servers without linking SDL, OpenAL, or external sound libraries.
 - **Config & History Persistence**: Settings persist to `~/.fireplace_conf` and completed focus intervals log to `~/.bonfire_history.json`.
+## Architecture & Notes
 
-## Documentation & Blog
-
-- [BLOG_POST.md](BLOG_POST.md): In-depth write-up covering the 3D raymarching pipeline, cellular automata convection, G-buffer outlines, and PCM audio streaming architecture.
-- [docs/architecture.md](docs/architecture.md): Technical notes on the raycast shader, thermal balance equations, and ragdoll log physics.
+Technical notes on the raymarching shader, thermal balance equations, and ragdoll log physics can be found in [docs/architecture.md](docs/architecture.md).
 
