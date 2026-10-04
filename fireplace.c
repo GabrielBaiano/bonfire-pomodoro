@@ -824,7 +824,7 @@ static void update_ambient_audio(void) {
 
 static void reset_terminal(void) {
     stop_ambient_sound();
-    safe_write(STDOUT_FILENO, "\033[?1049l\033[?25h\033[0m\n", 17);
+    safe_write(STDOUT_FILENO, "\033[?1000l\033[?1002l\033[?1006l\033[?2004l\033[?1049l\033[?25h\033[0m\n", 37);
     tcsetattr(STDIN_FILENO, TCSANOW, &g_orig_termios);
 }
 
@@ -853,7 +853,7 @@ static void setup_terminal(void) {
     sigaction(SIGTERM, &sa, NULL);
     sigaction(SIGWINCH, &sa, NULL);
 
-    safe_write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[2J", 15);
+    safe_write(STDOUT_FILENO, "\033[?1049h\033[?25l\033[?1000h\033[?1002h\033[?1006h\033[?2004h\033[2J", 35);
 }
 
 static void update_dimensions(void) {
@@ -4372,26 +4372,133 @@ static void ignite_fireplace(bool is_rekindle) {
     }
 }
 
+static int read_escape_sequence(char *seq, int max_len) {
+    int len = 0;
+    while (len < max_len - 1) {
+        char c;
+        if (read(STDIN_FILENO, &c, 1) <= 0) {
+            struct timespec ts = {0, 600000L}; // 0.6 ms
+            nanosleep(&ts, NULL);
+            if (read(STDIN_FILENO, &c, 1) <= 0) break;
+        }
+        seq[len++] = c;
+        if (len >= 2 && (
+            (c >= 'A' && c <= 'Z') ||
+            (c >= 'a' && c <= 'z') ||
+            c == '~'
+        )) {
+            break;
+        }
+    }
+    seq[len] = '\0';
+    return len;
+}
+
+static void drain_bracketed_paste(void) {
+    char pbuf[32];
+    int ppos = 0;
+    while (g_running) {
+        char pch;
+        if (read(STDIN_FILENO, &pch, 1) <= 0) {
+            struct timespec ts = {0, 2000000L};
+            nanosleep(&ts, NULL);
+            if (read(STDIN_FILENO, &pch, 1) <= 0) break;
+        }
+        if (pch == '\033') ppos = 0;
+        if (ppos < (int)sizeof(pbuf) - 1) pbuf[ppos++] = pch;
+        pbuf[ppos] = '\0';
+        if (strstr(pbuf, "[201~")) break;
+    }
+}
+
 static void handle_input(void) {
     char ch;
+    static int s_last_mouse_x = -1, s_last_mouse_y = -1;
+    static bool s_mouse_dragging = false;
+
     while (read(STDIN_FILENO, &ch, 1) > 0) {
         if (ch == '\033') {
-            char seq[2];
-            if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
-                if (seq[0] == '[') {
-                    if (seq[1] == 'A') { // Up arrow -> pitch up
-                        g_cam_pitch += 0.06f;
-                        if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
-                    } else if (seq[1] == 'B') { // Down arrow -> pitch down
-                        g_cam_pitch -= 0.06f;
-                        if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
-                    } else if (seq[1] == 'C') { // Right arrow -> yaw right
-                        g_cam_yaw += 0.08f;
-                    } else if (seq[1] == 'D') { // Left arrow -> yaw left
-                        g_cam_yaw -= 0.08f;
+            char seq[64];
+            int slen = read_escape_sequence(seq, sizeof(seq));
+            if (slen == 0) continue;
+
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') { // Up arrow -> pitch up
+                    g_cam_pitch += 0.06f;
+                    if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+                } else if (seq[1] == 'B') { // Down arrow -> pitch down
+                    g_cam_pitch -= 0.06f;
+                    if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+                } else if (seq[1] == 'C') { // Right arrow -> yaw right
+                    g_cam_yaw += 0.08f;
+                } else if (seq[1] == 'D') { // Left arrow -> yaw left
+                    g_cam_yaw -= 0.08f;
+                } else if (strcmp(seq, "[200~") == 0) {
+                    drain_bracketed_paste();
+                } else if (seq[1] == '<') {
+                    // SGR mouse event: \033[<btn;col;rowM or m
+                    int btn = 0, mx = 0, my = 0;
+                    char mode = 'M';
+                    if (sscanf(seq + 2, "%d;%d;%d%c", &btn, &mx, &my, &mode) >= 3) {
+                        if (mode == 'M') {
+                            if (btn == 1) { // Middle click -> Toggle 360 Turntable Orbit!
+                                g_auto_turntable = !g_auto_turntable;
+                            } else if (btn == 0) { // Left click down
+                                s_mouse_dragging = true;
+                                s_last_mouse_x = mx;
+                                s_last_mouse_y = my;
+                            } else if (btn == 32) { // Left drag motion
+                                if (s_mouse_dragging && s_last_mouse_x >= 0 && s_last_mouse_y >= 0) {
+                                    int dx = mx - s_last_mouse_x;
+                                    int dy = my - s_last_mouse_y;
+                                    g_cam_yaw += (float)dx * 0.025f;
+                                    g_cam_pitch -= (float)dy * 0.020f;
+                                    if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+                                    if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+                                }
+                                s_last_mouse_x = mx;
+                                s_last_mouse_y = my;
+                            } else if (btn == 64) { // Scroll up -> pitch up
+                                g_cam_pitch += 0.04f;
+                                if (g_cam_pitch > 1.25f) g_cam_pitch = 1.25f;
+                            } else if (btn == 65) { // Scroll down -> pitch down
+                                g_cam_pitch -= 0.04f;
+                                if (g_cam_pitch < -0.15f) g_cam_pitch = -0.15f;
+                            } else if (btn == 2) { // Right click -> Kindle or Stoke
+                                if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
+                                    ignite_fireplace(true);
+                                } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
+                                    ignite_fireplace(false);
+                                } else {
+                                    for (int sp = 0; sp < 45; sp++) {
+                                        Vec3 sp_p = (Vec3){(rand_f() - 0.5f) * 1.6f, -2.6f + rand_f() * 1.4f, (rand_f() - 0.5f) * 1.6f};
+                                        Vec3 sp_v = (Vec3){(rand_f() - 0.5f) * 2.2f, rand_f() * 4.0f + 2.2f, (rand_f() - 0.5f) * 2.2f};
+                                        spawn_spark_3d(sp_p, sp_v, rand_range(28, 65), (rand_f() > 0.35f) ? PALETTE_EMBERS[3] : PALETTE_EMBERS[4]);
+                                    }
+                                }
+                            }
+                        } else if (mode == 'm') {
+                            if (btn == 0 || btn == 32) {
+                                s_mouse_dragging = false;
+                                s_last_mouse_x = -1;
+                                s_last_mouse_y = -1;
+                            }
+                        }
+                    }
+                } else if (seq[1] == 'M') {
+                    // X10 mouse mode fallback
+                    char m_bytes[3];
+                    if (read(STDIN_FILENO, &m_bytes[0], 1) > 0 &&
+                        read(STDIN_FILENO, &m_bytes[1], 1) > 0 &&
+                        read(STDIN_FILENO, &m_bytes[2], 1) > 0) {
+                        int btn = (unsigned char)m_bytes[0] - 32;
+                        if (btn == 1) { // Middle click in X10
+                            g_auto_turntable = !g_auto_turntable;
+                        }
                     }
                 }
             }
+            continue;
         } else if (ch == 'p' || ch == 'P') {
             g_pomodoro_paused = !g_pomodoro_paused;
         } else if (ch == 'a' || ch == 'A' || ch == 'h') {
@@ -4757,33 +4864,62 @@ static bool run_setup_menu(void) {
             safe_write(STDOUT_FILENO, "\033[2J\033[H", 7);
         }
 
+        int box_w = 66;
+        int box_h = 17;
+        int start_r = (g_term_rows - box_h) / 2;
+        if (start_r < 1) start_r = 1;
+        int start_c = (g_term_cols - box_w) / 2;
+        if (start_c < 1) start_c = 1;
+
         char ch;
         while (read(STDIN_FILENO, &ch, 1) > 0) {
             if (ch == '\033') {
-                char seq[2];
-                if (read(STDIN_FILENO, &seq[0], 1) > 0 && read(STDIN_FILENO, &seq[1], 1) > 0) {
-                    if (seq[0] == '[') {
-                        if (seq[1] == 'A') { // Up
-                            selected = (selected + 5) % 6;
-                        } else if (seq[1] == 'B') { // Down
-                            selected = (selected + 1) % 6;
-                        } else if (seq[1] == 'D') { // Left
-                            if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
-                            else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
-                            else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
-                            else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
-                            else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
-                            else if (selected == 5) { volume = (volume >= 10) ? volume - 10 : 0; }
-                        } else if (seq[1] == 'C') { // Right
-                            if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
-                            else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
-                            else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
-                            else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
-                            else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
-                            else if (selected == 5) { volume = (volume <= 90) ? volume + 10 : 100; }
+                char seq[64];
+                int slen = read_escape_sequence(seq, sizeof(seq));
+                if (slen == 0) continue;
+
+                if (seq[0] == '[') {
+                    if (seq[1] == 'A') { // Up
+                        selected = (selected + 5) % 6;
+                    } else if (seq[1] == 'B') { // Down
+                        selected = (selected + 1) % 6;
+                    } else if (seq[1] == 'D') { // Left
+                        if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                        else if (selected == 1) { focus_min = (focus_min > 5) ? focus_min - 5 : 5; }
+                        else if (selected == 2) { short_break_min = (short_break_min > 1) ? short_break_min - 1 : 1; }
+                        else if (selected == 3) { long_break_min = (long_break_min > 5) ? long_break_min - 5 : 5; }
+                        else if (selected == 4) { sessions = (sessions > 1) ? sessions - 1 : 1; }
+                        else if (selected == 5) { volume = (volume >= 10) ? volume - 10 : 0; }
+                    } else if (seq[1] == 'C') { // Right
+                        if (selected == 0) g_is_dark_souls = !g_is_dark_souls;
+                        else if (selected == 1) { focus_min = (focus_min < 120) ? focus_min + 5 : 120; }
+                        else if (selected == 2) { short_break_min = (short_break_min < 30) ? short_break_min + 1 : 30; }
+                        else if (selected == 3) { long_break_min = (long_break_min < 60) ? long_break_min + 5 : 60; }
+                        else if (selected == 4) { sessions = (sessions < 12) ? sessions + 1 : 12; }
+                        else if (selected == 5) { volume = (volume <= 90) ? volume + 10 : 100; }
+                    } else if (strcmp(seq, "[200~") == 0) {
+                        drain_bracketed_paste();
+                    } else if (seq[1] == '<') {
+                        int btn = 0, mx = 0, my = 0;
+                        char mode = 'M';
+                        if (sscanf(seq + 2, "%d;%d;%d%c", &btn, &mx, &my, &mode) >= 3 && mode == 'M') {
+                            if (btn == 64) {
+                                selected = (selected + 5) % 6;
+                            } else if (btn == 65) {
+                                selected = (selected + 1) % 6;
+                            } else if (btn == 0) {
+                                int row_idx = my - (start_r + 5);
+                                if (row_idx >= 0 && row_idx <= 5) {
+                                    selected = row_idx;
+                                }
+                            } else if (btn == 1) {
+                                in_menu = false;
+                                break;
+                            }
                         }
                     }
                 }
+                continue;
             } else if (ch >= '1' && ch <= '6') {
                 selected = ch - '1';
             } else if (ch == 'w' || ch == 'W' || ch == 'k' || ch == 'K') {
@@ -4814,13 +4950,6 @@ static bool run_setup_menu(void) {
         }
 
         if (!in_menu) break;
-
-        int box_w = 66;
-        int box_h = 17;
-        int start_r = (g_term_rows - box_h) / 2;
-        if (start_r < 1) start_r = 1;
-        int start_c = (g_term_cols - box_w) / 2;
-        if (start_c < 1) start_c = 1;
 
         int len = 0;
         len += snprintf(menu_buf + len, sizeof(menu_buf) - len, "\033[H");

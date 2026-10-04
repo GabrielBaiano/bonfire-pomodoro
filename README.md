@@ -62,10 +62,12 @@ bonfire --fast
 
 ## Interactive Controls
 
-| Key | Action |
+| Key / Mouse | Action |
 | --- | --- |
-| `[E]` / `Enter` | Kindle bonfire (when unlit/extinguished) or stoke sparks |
-| `Space` (or `g` / `t`) | Toggle continuous 360° turntable rotation loop |
+| `[E]` / `Enter` / `Right Click` | Kindle bonfire (when unlit/extinguished) or stoke sparks |
+| `Space` / `Middle Click` (or `g` / `t`) | Toggle continuous 360° turntable rotation loop |
+| `Left Click + Drag` | Orbit camera yaw and pitch in real-time 3D |
+| `Mouse Wheel` | Tilt camera pitch (or `↑`/`↓`) |
 | `[P]` | Pause / resume current Pomodoro phase |
 | `[S]` | Skip phase (Focus → Rest → Next Focus) |
 | `[M]` | Mute / unmute ambient audio (keeps subtle alert chime) |
