@@ -48,14 +48,14 @@ make
 
 | Key | Action |
 | --- | --- |
-| `[E]` / `Space` | Kindle bonfire (when unlit/extinguished) or stoke sparks |
+| `[E]` / `Enter` | Kindle bonfire (when unlit/extinguished) or stoke sparks |
+| `Space` (or `g` / `t`) | Toggle continuous 360° turntable rotation loop |
 | `[P]` | Pause / resume current Pomodoro phase |
 | `[S]` | Skip phase (Focus → Rest → Next Focus) |
 | `[M]` | Mute / unmute audio |
 | `[` / `]` or `-` / `+` | Decrease / increase sound volume (10% steps) |
 | `←` / `→` or `a` / `d` or `h` / `l` | Orbit camera yaw (rotate left/right) |
 | `↑` / `↓` or `w` / `s` or `k` / `j` | Orbit camera pitch (tilt up/down) |
-| `Space` or `g` or `t` | Toggle automatic 360° turntable rotation (in classic mode) |
 | `r` | Rekindle / restart session from unlit state |
 | `q` | Quit session |
 

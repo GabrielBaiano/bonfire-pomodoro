@@ -3979,7 +3979,7 @@ static int format_frame_buffer(char *buf, int buf_cap) {
 
         if (g_fire_state == FIRE_STATE_UNLIT) {
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;30m[ BONFIRE UNLIT ]\033[0m  \033[1;38;2;220;180;90mFocus: %02d:00\033[0m  |  \033[1;37m[E / Space]\033[0m \033[38;2;255;215;100mKindle Bonfire\033[0m",
+                "\033[1;30m[ BONFIRE UNLIT ]\033[0m  \033[1;38;2;220;180;90mFocus: %02d:00\033[0m  |  \033[1;37m[E]\033[0m \033[38;2;255;215;100mKindle Bonfire\033[0m",
                 (int)(g_focus_duration / 60.0f));
         } else if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
             float el_foc = fminf(g_focus_duration, g_pomodoro_elapsed);
@@ -4019,12 +4019,12 @@ static int format_frame_buffer(char *buf, int buf_cap) {
 
             const char *rest_title = g_is_long_break ? "\033[1;38;2;120;210;255mLONG BREAK\033[0m" : "\033[1;38;2;255;110;30mSHORT BREAK\033[0m";
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "%s  \033[1;33m⏳ %02d:%02d\033[0m  \033[38;2;200;120;40m[%s]\033[0m  \033[1;37m[E / Space]\033[0m \033[1;38;2;255;215;100mStoke Embers to Rekindle\033[0m%s",
+                "%s  \033[1;33m⏳ %02d:%02d\033[0m  \033[38;2;200;120;40m[%s]\033[0m  \033[1;37m[E]\033[0m \033[1;38;2;255;215;100mStoke Embers to Rekindle\033[0m%s",
                 rest_title, r_m, r_s, bar,
                 g_pomodoro_paused ? "  \033[1;33m[PAUSED]\033[0m" : "");
         } else {
             hud_len = snprintf(hud_buf, sizeof(hud_buf),
-                "\033[1;30m[ EXTINGUISHED / COLD ASHES ]\033[0m  \033[1;37m[E / Space]\033[0m \033[38;2;255;215;100mKindle New Cycle\033[0m");
+                "\033[1;30m[ EXTINGUISHED / COLD ASHES ]\033[0m  \033[1;37m[E]\033[0m \033[38;2;255;215;100mKindle New Cycle\033[0m");
         }
 
         if (hud_len > 0) {
@@ -4046,32 +4046,32 @@ static int format_frame_buffer(char *buf, int buf_cap) {
 
     if (g_fire_state == FIRE_STATE_UNLIT) {
         snprintf(footer_buf, sizeof(footer_buf),
-            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
-            "\033[38;2;160;160;160m[M] %s   [-/+] %d%%   [Q] Quit\033[0m",
+            "\033[1;37m[E]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
+            "\033[38;2;160;160;160m[Space] 360°   [M] %s   [-/+] %d%%   [Q] Quit\033[0m",
             snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
         snprintf(footer_buf, sizeof(footer_buf),
-            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mRekindle\033[0m   "
-            "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
+            "\033[1;37m[E]\033[0m \033[38;2;255;200;90mRekindle\033[0m   "
+            "\033[38;2;160;160;160m[Space] 360°   [P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
             g_pomodoro_paused ? "Resume" : "Pause",
             snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_EXTINGUISHED) {
         snprintf(footer_buf, sizeof(footer_buf),
-            "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle New Cycle\033[0m   "
-            "\033[38;2;160;160;160m[M] %s   [-/+] %d%%   [Q] Quit\033[0m",
+            "\033[1;37m[E]\033[0m \033[38;2;255;200;90mKindle New Cycle\033[0m   "
+            "\033[38;2;160;160;160m[Space] 360°   [M] %s   [-/+] %d%%   [Q] Quit\033[0m",
             snd_mode, snd_vol);
     } else {
         // Active LIT FOCUS
         if (g_is_dark_souls) {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[E]\033[0m \033[38;2;255;200;90mStoke\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
+                "\033[38;2;160;160;160m[Space] 360°   [P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
                 g_pomodoro_paused ? "Resume" : "Pause",
                 snd_mode, snd_vol);
         } else {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[F]\033[0m \033[38;2;255;200;90mWood\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
+                "\033[38;2;160;160;160m[Space] 360°   [P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
                 g_pomodoro_paused ? "Resume" : "Pause",
                 snd_mode, snd_vol);
         }
@@ -4425,14 +4425,8 @@ static void handle_input(void) {
             } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
                 ignite_fireplace(false);
             }
-        } else if (ch == 'g' || ch == 'G' || ch == 't' || ch == 'T' || ch == ' ') {
-            if (ch == ' ' && (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED)) {
-                ignite_fireplace(false);
-            } else if (ch == ' ' && g_fire_state == FIRE_STATE_SMOLDERING_REST) {
-                ignite_fireplace(true);
-            } else {
-                g_auto_turntable = !g_auto_turntable;
-            }
+        } else if (ch == ' ' || ch == 'g' || ch == 'G' || ch == 't' || ch == 'T') {
+            g_auto_turntable = !g_auto_turntable;
         } else if (ch == 'f' || ch == 'F') {
             if (!g_is_dark_souls) {
                 stoke_fire_add_wood();
