@@ -789,11 +789,18 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
             size_t sample_pos = 0;
             while (sample_pos < total_samples) {
                 int cur_vol = (g_shared_volume != NULL) ? *g_shared_volume : volume_pct;
-                float vol_factor = (float)cur_vol / 100.0f;
+                if (cur_vol < 0) cur_vol = 0;
+                if (cur_vol > 100) cur_vol = 100;
+                float v_norm = (float)cur_vol / 100.0f;
+                // Perceptual quadratic curve: matches standard OS volume sliders and human ear sensitivity
+                float vol_factor = v_norm * v_norm;
                 size_t batch = total_samples - sample_pos;
                 if (batch > 1024) batch = 1024;
                 for (size_t i = 0; i < batch; i++) {
-                    chunk[i] = (int16_t)((float)src[sample_pos + i] * vol_factor);
+                    float s = (float)src[sample_pos + i] * vol_factor;
+                    if (s > 32767.0f) s = 32767.0f;
+                    if (s < -32768.0f) s = -32768.0f;
+                    chunk[i] = (int16_t)s;
                 }
                 ssize_t written = write(audio_pipe[1], chunk, batch * sizeof(int16_t));
                 if (written <= 0) {
@@ -4257,17 +4264,19 @@ static void play_oneshot_sound_volume(const unsigned char *data, size_t total, f
 
 static void play_bonfire_sound(void) {
     if (!g_sound_enabled || g_sound_volume <= 0) return;
-    float vol = (float)g_sound_volume / 100.0f;
+    float v_norm = (float)g_sound_volume / 100.0f;
+    float vol = v_norm * v_norm;
     play_oneshot_sound_volume(assets_bonfire_original_16bit_wav, assets_bonfire_original_16bit_wav_len, vol);
 }
 
 static void play_alert_sound(void) {
     // When muted or sound volume is 0, do NOT silence the phase completion alert!
-    // Keep it at a subtle minimum level (~15% volume) so the user knows time ended.
-    float vol = 0.15f;
+    // Keep it at a subtle minimum level (~0.08 perceptual gain) so the user knows time ended.
+    float vol = 0.08f;
     if (g_sound_enabled && g_sound_volume > 0) {
-        vol = (float)g_sound_volume / 100.0f;
-        if (vol < 0.15f) vol = 0.15f;
+        float v_norm = (float)g_sound_volume / 100.0f;
+        vol = v_norm * v_norm;
+        if (vol < 0.08f) vol = 0.08f;
     }
     play_oneshot_sound_volume(assets_item_discovery_wav, assets_item_discovery_wav_len, vol);
 }
