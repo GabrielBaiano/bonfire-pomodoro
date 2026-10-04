@@ -32,12 +32,19 @@
 #include <strings.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <sys/mman.h>
 #include "sound_bonfire.h"
 #include "sound_ds_ambient.h"
 #include "sound_wood_ambient.h"
+#include "sound_alert.h"
 
 static bool g_sound_enabled = true;
 static int g_sound_volume = 50; // 0-100% volume
+static int *g_shared_volume = NULL;
+
+static void play_alert_sound(void);
+static void send_system_notification(const char *title, const char *msg);
+static void sync_volume_config(void);
 
 #ifndef M_PI
 #define M_PI 3.14159265358979323846
@@ -732,6 +739,10 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
     if (!g_sound_enabled || volume_pct <= 0) return;
     stop_ambient_sound();
 
+    if (g_shared_volume) {
+        *g_shared_volume = volume_pct;
+    }
+
     pid_t pid = fork();
     if (pid < 0) return;
 
@@ -772,12 +783,13 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
 
         const int16_t *src = (const int16_t *)(is_dark_souls ? assets_ds_fire_ambient_pcm : assets_wood_fire_ambient_pcm);
         size_t total_samples = (is_dark_souls ? assets_ds_fire_ambient_pcm_len : assets_wood_fire_ambient_pcm_len) / sizeof(int16_t);
-        float vol_factor = (float)volume_pct / 100.0f;
 
         int16_t chunk[1024];
         while (1) {
             size_t sample_pos = 0;
             while (sample_pos < total_samples) {
+                int cur_vol = (g_shared_volume != NULL) ? *g_shared_volume : volume_pct;
+                float vol_factor = (float)cur_vol / 100.0f;
                 size_t batch = total_samples - sample_pos;
                 if (batch > 1024) batch = 1024;
                 for (size_t i = 0; i < batch; i++) {
@@ -800,8 +812,10 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
 
 static void update_ambient_audio(void) {
     if (!g_sound_enabled || g_sound_volume <= 0 || g_pomodoro_paused || g_fire_state != FIRE_STATE_LIT_FOCUS) {
+        if (g_shared_volume) *g_shared_volume = 0;
         stop_ambient_sound();
     } else {
+        if (g_shared_volume) *g_shared_volume = g_sound_volume;
         if (g_ambient_pgid <= 0) {
             start_ambient_sound(g_is_dark_souls, g_sound_volume);
         }
@@ -1960,6 +1974,8 @@ static void update_simulation(void) {
                     g_banner_type = BANNER_REST;
                 }
                 g_banner_timer = 4.0f;
+                play_alert_sound();
+                send_system_notification("Bonfire Pomodoro", g_is_long_break ? "Focus complete! Time for a long rest." : "Focus complete! Rest at the bonfire.");
                 if (!g_cycle_logged) {
                     g_cycle_logged = true;
                     int target_min = (int)(g_focus_duration / 60.0f);
@@ -1981,6 +1997,8 @@ static void update_simulation(void) {
                 g_ash_bed.heat = 0.0f;
                 g_banner_type = BANNER_EXTINGUISHED;
                 g_banner_timer = 4.5f;
+                play_alert_sound();
+                send_system_notification("Bonfire Pomodoro", "Rest ended! Kindle the flame to begin your next focus session.");
             }
         }
     }
@@ -4029,31 +4047,31 @@ static int format_frame_buffer(char *buf, int buf_cap) {
     if (g_fire_state == FIRE_STATE_UNLIT) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle\033[0m   "
-            "\033[38;2;160;160;160m[M] %s (%d%%)   [Q] Quit\033[0m",
+            "\033[38;2;160;160;160m[M] %s   [-/+] %d%%   [Q] Quit\033[0m",
             snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mRekindle\033[0m   "
-            "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+            "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
             g_pomodoro_paused ? "Resume" : "Pause",
             snd_mode, snd_vol);
     } else if (g_fire_state == FIRE_STATE_EXTINGUISHED) {
         snprintf(footer_buf, sizeof(footer_buf),
             "\033[1;37m[E / Space]\033[0m \033[38;2;255;200;90mKindle New Cycle\033[0m   "
-            "\033[38;2;160;160;160m[M] %s (%d%%)   [Q] Quit\033[0m",
+            "\033[38;2;160;160;160m[M] %s   [-/+] %d%%   [Q] Quit\033[0m",
             snd_mode, snd_vol);
     } else {
         // Active LIT FOCUS
         if (g_is_dark_souls) {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[E]\033[0m \033[38;2;255;200;90mStoke\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+                "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
                 g_pomodoro_paused ? "Resume" : "Pause",
                 snd_mode, snd_vol);
         } else {
             snprintf(footer_buf, sizeof(footer_buf),
                 "\033[1;37m[F]\033[0m \033[38;2;255;200;90mWood\033[0m   "
-                "\033[38;2;160;160;160m[P] %s   [M] %s (%d%%)   [S] Skip   [Q] Quit\033[0m",
+                "\033[38;2;160;160;160m[P] %s   [M] %s   [-/+] %d%%   [S] Skip   [Q] Quit\033[0m",
                 g_pomodoro_paused ? "Resume" : "Pause",
                 snd_mode, snd_vol);
         }
@@ -4156,8 +4174,8 @@ static void present_frame(void) {
     }
 }
 
-static void play_bonfire_sound(void) {
-    if (!g_sound_enabled || g_sound_volume <= 0) return;
+static void play_oneshot_sound(const unsigned char *data, size_t total) {
+    if (!g_sound_enabled || g_sound_volume <= 0 || !data || total == 0) return;
 
     pid_t pid = fork();
     if (pid < 0) return;
@@ -4219,8 +4237,6 @@ static void play_bonfire_sound(void) {
     close(audio_pipe[0]);
     signal(SIGPIPE, SIG_IGN);
 
-    const unsigned char *data = assets_bonfire_original_16bit_wav;
-    size_t total = assets_bonfire_original_16bit_wav_len;
     size_t sent = 0;
     while (sent < total) {
         ssize_t n = write(audio_pipe[1], data + sent, total - sent);
@@ -4231,6 +4247,31 @@ static void play_bonfire_sound(void) {
 
     waitpid(player_pid, NULL, 0);
     _exit(0);
+}
+
+static void play_bonfire_sound(void) {
+    play_oneshot_sound(assets_bonfire_original_16bit_wav, assets_bonfire_original_16bit_wav_len);
+}
+
+static void play_alert_sound(void) {
+    play_oneshot_sound(assets_item_discovery_wav, assets_item_discovery_wav_len);
+}
+
+static void send_system_notification(const char *title, const char *msg) {
+    pid_t pid = fork();
+    if (pid == 0) {
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+        execlp("notify-send", "notify-send", "-a", "Bonfire Pomodoro", "-i", "dialog-information", title, msg, (char *)NULL);
+        _exit(0);
+    }
+    if (pid > 0) {
+        waitpid(pid, NULL, WNOHANG);
+    }
 }
 
 static void ignite_fireplace(bool is_rekindle) {
@@ -4342,6 +4383,7 @@ static void handle_input(void) {
             }
         } else if (ch == 's' || ch == 'S' || ch == 'n' || ch == 'N') {
             // Skip current Pomodoro phase
+            play_alert_sound();
             if (g_fire_state == FIRE_STATE_LIT_FOCUS) {
                 g_pomodoro_elapsed = 0.0f;
                 g_pomodoro_cycles_done++;
@@ -4413,19 +4455,32 @@ static void handle_input(void) {
         } else if (ch == 'm' || ch == 'M') {
             g_sound_enabled = !g_sound_enabled;
             if (g_sound_enabled && g_sound_volume == 0) g_sound_volume = 50;
-            stop_ambient_sound();
-            update_ambient_audio();
+            if (g_shared_volume) *g_shared_volume = g_sound_enabled ? g_sound_volume : 0;
+            if (!g_sound_enabled) {
+                stop_ambient_sound();
+            } else if (g_ambient_pgid <= 0 && !g_pomodoro_paused && g_fire_state == FIRE_STATE_LIT_FOCUS) {
+                start_ambient_sound(g_is_dark_souls, g_sound_volume);
+            }
+            sync_volume_config();
         } else if (ch == '[' || ch == '-') {
             g_sound_volume -= 10;
             if (g_sound_volume < 0) g_sound_volume = 0;
-            stop_ambient_sound();
-            update_ambient_audio();
+            if (g_shared_volume) *g_shared_volume = g_sound_volume;
+            if (g_sound_volume == 0) {
+                stop_ambient_sound();
+            } else if (g_ambient_pgid <= 0 && g_sound_enabled && !g_pomodoro_paused && g_fire_state == FIRE_STATE_LIT_FOCUS) {
+                start_ambient_sound(g_is_dark_souls, g_sound_volume);
+            }
+            sync_volume_config();
         } else if (ch == ']' || ch == '+' || ch == '=') {
             g_sound_volume += 10;
             if (g_sound_volume > 100) g_sound_volume = 100;
             g_sound_enabled = true;
-            stop_ambient_sound();
-            update_ambient_audio();
+            if (g_shared_volume) *g_shared_volume = g_sound_volume;
+            if (g_ambient_pgid <= 0 && !g_pomodoro_paused && g_fire_state == FIRE_STATE_LIT_FOCUS) {
+                start_ambient_sound(g_is_dark_souls, g_sound_volume);
+            }
+            sync_volume_config();
         } else if (ch == 'q' || ch == 'Q') {
             g_running = 0;
         }
@@ -4632,6 +4687,15 @@ static void save_user_config(int style, int focus_min, int short_break_min, int 
     fprintf(f, "sessions=%d\n", sessions);
     fprintf(f, "volume=%d\n", volume);
     fclose(f);
+}
+
+static void sync_volume_config(void) {
+    int focus_min = (int)(g_focus_duration / 60.0f);
+    int short_break_min = (int)(g_short_break_duration / 60.0f);
+    int long_break_min = (int)(g_long_break_duration / 60.0f);
+    int sessions = g_sessions_before_long_break;
+    int style = g_is_dark_souls ? 1 : 0;
+    save_user_config(style, focus_min, short_break_min, long_break_min, sessions, g_sound_volume);
 }
 
 static bool run_setup_menu(void) {
@@ -4846,6 +4910,7 @@ static bool run_setup_menu(void) {
     // Apply configuration and persist to ~/.fireplace_conf
     g_sound_volume = volume;
     g_sound_enabled = (volume > 0);
+    if (g_shared_volume) *g_shared_volume = volume;
     save_user_config(g_is_dark_souls ? 1 : 0, focus_min, short_break_min, long_break_min, sessions, volume);
     g_focus_duration = (float)focus_min * 60.0f;
     g_short_break_duration = (float)short_break_min * 60.0f;
@@ -4860,6 +4925,13 @@ static bool run_setup_menu(void) {
 
 int main(int argc, char **argv) {
     g_rng ^= (uint32_t)time(NULL) ^ ((uint32_t)getpid() << 16) ^ 0x9e3779b9;
+
+    g_shared_volume = mmap(NULL, sizeof(int), PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+    if (g_shared_volume != MAP_FAILED) {
+        *g_shared_volume = g_sound_volume;
+    } else {
+        g_shared_volume = NULL;
+    }
 
     bool do_benchmark = false;
     int benchmark_frames = 200;
