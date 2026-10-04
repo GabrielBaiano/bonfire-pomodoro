@@ -16,15 +16,20 @@ clean:
 
 PREFIX ?= $(HOME)/.local
 BINDIR ?= $(PREFIX)/bin
+APPDIR ?= $(PREFIX)/share/applications
 
 install: $(TARGET)
 	mkdir -p $(DESTDIR)$(BINDIR)
 	install -m 755 $(TARGET) $(DESTDIR)$(BINDIR)/$(TARGET)
 	ln -sf $(TARGET) $(DESTDIR)$(BINDIR)/$(SYMLINK)
+	@if [ -d "$(DESTDIR)$(APPDIR)" ]; then \
+		install -m 644 packaging/desktop/bonfire.desktop $(DESTDIR)$(APPDIR)/bonfire.desktop; \
+	fi
 
 uninstall:
 	rm -f $(DESTDIR)$(BINDIR)/$(TARGET)
 	rm -f $(DESTDIR)$(BINDIR)/$(SYMLINK)
+	rm -f $(DESTDIR)$(APPDIR)/bonfire.desktop
 
 .PHONY: all clean install uninstall
 

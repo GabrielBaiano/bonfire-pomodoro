@@ -1,5 +1,9 @@
 # bonfire-pomodoro
 
+[![CI](https://github.com/GabrielBaiano/bonfire-pomodoro/actions/workflows/ci.yml/badge.svg)](https://github.com/GabrielBaiano/bonfire-pomodoro/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/GabrielBaiano/bonfire-pomodoro)](https://github.com/GabrielBaiano/bonfire-pomodoro/releases/latest)
+[![License: GPL v3](https://img.shields.io/badge/License-GPLv3-blue.svg)](LICENSE)
+
 A Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor ASCII art directly in your Linux terminal. Single C99 source file, zero external dependencies beyond libc and libm.
 <p align="center">
   <img src="docs/media/dark_souls_bonfire.gif" alt="Dark Souls Bonfire" width="100%">
@@ -14,29 +18,34 @@ A Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor A
 - **Continuous 360° Orbit**: Hit `Space` at any moment to toggle a continuous turntable camera loop orbiting the 3D coiled sword and flame.
 - **Smart Mute**: Muting (`[M]`) silences ambient crackling while keeping the end-of-cycle chime audible at a subtle, non-intrusive volume (~15%).
 
-## Quick Start
+## Installation
 
-### Build & Run
+### One-Line Install (Recommended)
+
+```bash
+curl -sSL https://raw.githubusercontent.com/GabrielBaiano/bonfire-pomodoro/main/install.sh | bash
+```
+
+### Build from Source
 
 ```bash
 git clone https://github.com/GabrielBaiano/bonfire-pomodoro.git
 cd bonfire-pomodoro
 make
-./bonfire
-```
-
-### Install Globally
-
-Install `bonfire` (and `fireplace` alias) to `~/.local/bin`:
-
-```bash
 make install
 ```
 
-Make sure `~/.local/bin` is in your `$PATH`. You can then launch it from anywhere simply by typing:
+Make sure `~/.local/bin` is in your `$PATH`. You can then launch it from anywhere simply by typing `bonfire`.
+
+### Arch Linux (AUR)
 
 ```bash
-bonfire
+# Using an AUR helper
+yay -S bonfire-pomodoro
+
+# Or build manually with makepkg
+cd packaging/aur
+makepkg -si
 ```
 
 ## CLI Usage

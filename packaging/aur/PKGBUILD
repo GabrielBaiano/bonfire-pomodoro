@@ -1,0 +1,31 @@
+# Maintainer: GabrielBaiano <gabrielngama@gmail.com>
+pkgname=bonfire-pomodoro
+pkgver=1.0.0
+pkgrel=1
+pkgdesc="Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor ASCII art"
+arch=('x86_64' 'aarch64')
+url="https://github.com/GabrielBaiano/bonfire-pomodoro"
+license=('GPL-3.0-only')
+depends=('glibc')
+makedepends=('make' 'gcc')
+optdepends=(
+    'libnotify: background desktop notifications'
+    'pipewire: ambient audio and alert chimes'
+    'pulseaudio: ambient audio and alert chimes'
+    'alsa-utils: ambient audio and alert chimes'
+)
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('d178d40da41898e4f039b7e6631f0fc1a4e85962b427b7038680878297bdc3e6')
+
+build() {
+    cd "$pkgname-$pkgver"
+    make
+}
+
+package() {
+    cd "$pkgname-$pkgver"
+    install -Dm755 bonfire "$pkgdir/usr/bin/bonfire"
+    ln -s bonfire "$pkgdir/usr/bin/fireplace"
+    install -Dm644 README.md "$pkgdir/usr/share/doc/$pkgname/README.md"
+    install -Dm644 LICENSE "$pkgdir/usr/share/licenses/$pkgname/LICENSE"
+}

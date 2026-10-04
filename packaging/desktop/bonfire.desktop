@@ -1,0 +1,9 @@
+[Desktop Entry]
+Name=Bonfire Pomodoro
+Comment=Dark Souls Bonfire Pomodoro timer in 3D TrueColor ASCII
+Exec=bonfire
+Icon=utilities-terminal
+Terminal=true
+Type=Application
+Categories=Utility;Clock;
+Keywords=pomodoro;timer;bonfire;darksouls;focus;
