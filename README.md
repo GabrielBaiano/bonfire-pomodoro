@@ -88,3 +88,6 @@ bonfire --fast
 
 Technical notes on the raymarching shader, thermal balance equations, and ragdoll log physics can be found in [docs/architecture.md](docs/architecture.md).
 
+## License
+
+This project is licensed under the [GNU General Public License v3.0](LICENSE).

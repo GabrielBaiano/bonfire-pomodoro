@@ -1,0 +1,29 @@
+name: CI
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build & Test (${{ matrix.compiler }})
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        compiler: [gcc, clang]
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Compile with ${{ matrix.compiler }}
+        run: |
+          make clean
+          make CC=${{ matrix.compiler }} CFLAGS="-O3 -Wall -Wextra -std=c99 -pedantic -Werror"
+
+      - name: Test execution and headless rendering
+        run: |
+          ./bonfire --benchmark 100
+          ./bonfire --souls --turntable /tmp 10 10
