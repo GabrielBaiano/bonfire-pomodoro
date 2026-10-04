@@ -4174,8 +4174,8 @@ static void present_frame(void) {
     }
 }
 
-static void play_oneshot_sound(const unsigned char *data, size_t total) {
-    if (!g_sound_enabled || g_sound_volume <= 0 || !data || total == 0) return;
+static void play_oneshot_sound_volume(const unsigned char *data, size_t total, float volume_scale) {
+    if (!data || total == 0 || volume_scale <= 0.001f) return;
 
     pid_t pid = fork();
     if (pid < 0) return;
@@ -4218,11 +4218,17 @@ static void play_oneshot_sound(const unsigned char *data, size_t total) {
         }
 
         char vol_str[32];
-        snprintf(vol_str, sizeof(vol_str), "%.2f", (float)g_sound_volume / 100.0f);
+        snprintf(vol_str, sizeof(vol_str), "%.2f", volume_scale);
+
+        char pa_vol_str[32];
+        int pa_vol = (int)(volume_scale * 65536.0f);
+        if (pa_vol > 65536) pa_vol = 65536;
+        if (pa_vol < 1) pa_vol = 1;
+        snprintf(pa_vol_str, sizeof(pa_vol_str), "--volume=%d", pa_vol);
 
         // Try available audio players in order
         execlp("pw-play", "pw-play", "--volume", vol_str, "-", (char *)NULL);
-        execlp("paplay", "paplay", "/dev/stdin", (char *)NULL);
+        execlp("paplay", "paplay", pa_vol_str, "/dev/stdin", (char *)NULL);
         execlp("aplay", "aplay", "-q", "-", (char *)NULL);
         _exit(1);
     }
@@ -4250,28 +4256,56 @@ static void play_oneshot_sound(const unsigned char *data, size_t total) {
 }
 
 static void play_bonfire_sound(void) {
-    play_oneshot_sound(assets_bonfire_original_16bit_wav, assets_bonfire_original_16bit_wav_len);
+    if (!g_sound_enabled || g_sound_volume <= 0) return;
+    float vol = (float)g_sound_volume / 100.0f;
+    play_oneshot_sound_volume(assets_bonfire_original_16bit_wav, assets_bonfire_original_16bit_wav_len, vol);
 }
 
 static void play_alert_sound(void) {
-    play_oneshot_sound(assets_item_discovery_wav, assets_item_discovery_wav_len);
+    // When muted or sound volume is 0, do NOT silence the phase completion alert!
+    // Keep it at a subtle minimum level (~15% volume) so the user knows time ended.
+    float vol = 0.15f;
+    if (g_sound_enabled && g_sound_volume > 0) {
+        vol = (float)g_sound_volume / 100.0f;
+        if (vol < 0.15f) vol = 0.15f;
+    }
+    play_oneshot_sound_volume(assets_item_discovery_wav, assets_item_discovery_wav_len, vol);
 }
 
 static void send_system_notification(const char *title, const char *msg) {
+    // 1. Ring terminal bell to trigger window manager urgency / tab highlight
+    safe_write(STDOUT_FILENO, "\a", 1);
+
+    // 2. Dispatch desktop notification via detached grandchild
     pid_t pid = fork();
-    if (pid == 0) {
-        int devnull = open("/dev/null", O_WRONLY);
-        if (devnull >= 0) {
-            dup2(devnull, STDOUT_FILENO);
-            dup2(devnull, STDERR_FILENO);
-            close(devnull);
-        }
-        execlp("notify-send", "notify-send", "-a", "Bonfire Pomodoro", "-i", "dialog-information", title, msg, (char *)NULL);
+    if (pid < 0) return;
+    if (pid > 0) {
+        waitpid(pid, NULL, 0);
+        return;
+    }
+
+    pid_t pid2 = fork();
+    if (pid2 > 0) {
         _exit(0);
     }
-    if (pid > 0) {
-        waitpid(pid, NULL, WNOHANG);
+    if (pid2 < 0) {
+        _exit(1);
     }
+
+    int devnull = open("/dev/null", O_WRONLY);
+    if (devnull >= 0) {
+        dup2(devnull, STDOUT_FILENO);
+        dup2(devnull, STDERR_FILENO);
+        close(devnull);
+    }
+
+    execlp("notify-send", "notify-send",
+           "-a", "Bonfire Pomodoro",
+           "-u", "normal",
+           "-t", "8000",
+           "-i", "preferences-system-time",
+           title, msg, (char *)NULL);
+    _exit(0);
 }
 
 static void ignite_fireplace(bool is_rekindle) {
@@ -4398,10 +4432,13 @@ static void handle_input(void) {
                 }
                 g_banner_timer = 3.5f;
                 g_fire_state = FIRE_STATE_SMOLDERING_REST;
+                send_system_notification("Bonfire Pomodoro", g_is_long_break ? "Skipped to Long Rest." : "Skipped to Short Rest.");
             } else if (g_fire_state == FIRE_STATE_SMOLDERING_REST) {
                 ignite_fireplace(true);
+                send_system_notification("Bonfire Pomodoro", "Rekindled! Beginning focus session.");
             } else if (g_fire_state == FIRE_STATE_UNLIT || g_fire_state == FIRE_STATE_EXTINGUISHED) {
                 ignite_fireplace(false);
+                send_system_notification("Bonfire Pomodoro", "Kindled! Beginning focus session.");
             }
         } else if (ch == 'j' || ch == 'J' || ch == 'z' || ch == 'Z') {
             g_cam_pitch -= 0.06f;
