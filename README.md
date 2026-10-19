@@ -26,6 +26,12 @@ A Dark Souls-inspired physical bonfire Pomodoro timer rendered in 3D TrueColor A
 curl -sSL https://raw.githubusercontent.com/GabrielBaiano/bonfire-pomodoro/main/install.sh | bash
 ```
 
+### Homebrew (macOS & Linux)
+
+```bash
+brew install GabrielBaiano/tap/bonfire-pomodoro
+```
+
 ### Build from Source
 
 ```bash
