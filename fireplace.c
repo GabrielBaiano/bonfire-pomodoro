@@ -731,6 +731,45 @@ static void safe_write(int fd, const void *buf, size_t count) {
     (void)ret;
 }
 
+#ifdef __APPLE__
+static void write_wav_header(int fd, uint32_t data_size, uint32_t sample_rate, uint16_t channels, uint16_t bits_per_sample) {
+    uint32_t byte_rate = sample_rate * channels * (bits_per_sample / 8);
+    uint16_t block_align = channels * (bits_per_sample / 8);
+    uint32_t chunk_size = 36 + data_size;
+
+    uint8_t header[44];
+    memcpy(header, "RIFF", 4);
+    header[4] = (uint8_t)(chunk_size & 0xFF);
+    header[5] = (uint8_t)((chunk_size >> 8) & 0xFF);
+    header[6] = (uint8_t)((chunk_size >> 16) & 0xFF);
+    header[7] = (uint8_t)((chunk_size >> 24) & 0xFF);
+    memcpy(header + 8, "WAVEfmt ", 8);
+    header[16] = 16; header[17] = 0; header[18] = 0; header[19] = 0;
+    header[20] = 1; header[21] = 0;
+    header[22] = (uint8_t)(channels & 0xFF);
+    header[23] = (uint8_t)((channels >> 8) & 0xFF);
+    header[24] = (uint8_t)(sample_rate & 0xFF);
+    header[25] = (uint8_t)((sample_rate >> 8) & 0xFF);
+    header[26] = (uint8_t)((sample_rate >> 16) & 0xFF);
+    header[27] = (uint8_t)((sample_rate >> 24) & 0xFF);
+    header[28] = (uint8_t)(byte_rate & 0xFF);
+    header[29] = (uint8_t)((byte_rate >> 8) & 0xFF);
+    header[30] = (uint8_t)((byte_rate >> 16) & 0xFF);
+    header[31] = (uint8_t)((byte_rate >> 24) & 0xFF);
+    header[32] = (uint8_t)(block_align & 0xFF);
+    header[33] = (uint8_t)((block_align >> 8) & 0xFF);
+    header[34] = (uint8_t)(bits_per_sample & 0xFF);
+    header[35] = (uint8_t)((bits_per_sample >> 8) & 0xFF);
+    memcpy(header + 36, "data", 4);
+    header[40] = (uint8_t)(data_size & 0xFF);
+    header[41] = (uint8_t)((data_size >> 8) & 0xFF);
+    header[42] = (uint8_t)((data_size >> 16) & 0xFF);
+    header[43] = (uint8_t)((data_size >> 24) & 0xFF);
+
+    safe_write(fd, header, 44);
+}
+#endif
+
 static pid_t g_ambient_pgid = -1;
 
 static void stop_ambient_sound(void) {
@@ -758,6 +797,51 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
         signal(SIGPIPE, SIG_IGN);
         signal(SIGTERM, SIG_DFL);
 
+#ifdef __APPLE__
+        const int16_t *src = (const int16_t *)(is_dark_souls ? assets_ds_fire_ambient_pcm : assets_wood_fire_ambient_pcm);
+        size_t data_len = is_dark_souls ? assets_ds_fire_ambient_pcm_len : assets_wood_fire_ambient_pcm_len;
+
+        char tmp_path[64];
+        snprintf(tmp_path, sizeof(tmp_path), "/tmp/bonfire_amb_%d.wav", (int)getpid());
+        int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (fd < 0) _exit(1);
+
+        write_wav_header(fd, (uint32_t)data_len, 22050, 1, 16);
+        safe_write(fd, src, data_len);
+        close(fd);
+
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+
+        while (1) {
+            int cur_vol = (g_shared_volume != NULL) ? *g_shared_volume : volume_pct;
+            if (cur_vol <= 0) break;
+            if (cur_vol > 100) cur_vol = 100;
+            float v_norm = (float)cur_vol / 100.0f;
+            float vol_factor = v_norm * v_norm;
+
+            char vol_str[32];
+            snprintf(vol_str, sizeof(vol_str), "%.2f", vol_factor);
+
+            pid_t p = fork();
+            if (p == 0) {
+                execlp("afplay", "afplay", "-v", vol_str, tmp_path, (char *)NULL);
+                _exit(1);
+            }
+            if (p > 0) {
+                int st;
+                waitpid(p, &st, 0);
+            } else {
+                break;
+            }
+        }
+        unlink(tmp_path);
+        _exit(0);
+#else
         int audio_pipe[2];
         if (pipe(audio_pipe) != 0) _exit(1);
 
@@ -819,6 +903,7 @@ static void start_ambient_sound(bool is_dark_souls, int volume_pct) {
             }
         }
         _exit(0);
+#endif
     }
 
     g_ambient_pgid = pid;
@@ -4348,6 +4433,36 @@ static void play_oneshot_sound_volume(const unsigned char *data, size_t total, f
         _exit(1);
     }
 
+#ifdef __APPLE__
+    char tmp_path[64];
+    snprintf(tmp_path, sizeof(tmp_path), "/tmp/bonfire_shot_%d.wav", (int)getpid());
+    int fd = open(tmp_path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd >= 0) {
+        safe_write(fd, data, total);
+        close(fd);
+
+        int devnull = open("/dev/null", O_WRONLY);
+        if (devnull >= 0) {
+            dup2(devnull, STDOUT_FILENO);
+            dup2(devnull, STDERR_FILENO);
+            close(devnull);
+        }
+
+        char vol_str[32];
+        snprintf(vol_str, sizeof(vol_str), "%.2f", volume_scale);
+
+        pid_t player_pid = fork();
+        if (player_pid == 0) {
+            execlp("afplay", "afplay", "-v", vol_str, tmp_path, (char *)NULL);
+            _exit(1);
+        }
+        if (player_pid > 0) {
+            waitpid(player_pid, NULL, 0);
+        }
+        unlink(tmp_path);
+    }
+    _exit(0);
+#else
     // Grandchild: completely detached from main terminal process
     int audio_pipe[2];
     if (pipe(audio_pipe) != 0) {
@@ -4406,6 +4521,7 @@ static void play_oneshot_sound_volume(const unsigned char *data, size_t total, f
 
     waitpid(player_pid, NULL, 0);
     _exit(0);
+#endif
 }
 
 static void play_bonfire_sound(void) {
@@ -4454,12 +4570,18 @@ static void send_system_notification(const char *title, const char *msg) {
         close(devnull);
     }
 
+#ifdef __APPLE__
+    char script[1024];
+    snprintf(script, sizeof(script), "display notification \"%s\" with title \"%s\"", msg, title);
+    execlp("osascript", "osascript", "-e", script, (char *)NULL);
+#else
     execlp("notify-send", "notify-send",
            "-a", "Bonfire Pomodoro",
            "-u", "normal",
            "-t", "8000",
            "-i", "preferences-system-time",
            title, msg, (char *)NULL);
+#endif
     _exit(0);
 }
 

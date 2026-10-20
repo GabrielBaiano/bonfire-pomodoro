@@ -8,11 +8,15 @@ on:
 
 jobs:
   build:
-    name: Build & Test (${{ matrix.compiler }})
-    runs-on: ubuntu-latest
+    name: Build & Test (${{ matrix.os }}, ${{ matrix.compiler }})
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        compiler: [gcc, clang]
+        os: [ubuntu-latest, macos-latest]
+        compiler: [clang]
+        include:
+          - os: ubuntu-latest
+            compiler: gcc
 
     steps:
       - name: Checkout code
