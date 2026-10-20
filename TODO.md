@@ -2,9 +2,9 @@
 
 Tarefas técnicas priorizadas para aprimoramento e manutenção contínua do utilitário.
 
-## Em Andamento 🚀
+## Concluído Recentemente ✅
 
-- [ ] **Compatibilidade Nativa com macOS (Homebrew)**
+- [x] **Compatibilidade Nativa com macOS (Homebrew)**
   - Áudio nativo usando `afplay` como reprodutor de sistema (oneshots e loop ambiente)
   - Notificações de desktop nativas no macOS via `osascript`
   - Matriz multiplataforma no GitHub Actions CI (`ubuntu-latest` e `macos-latest`)
