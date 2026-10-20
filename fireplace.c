@@ -16,6 +16,8 @@
  */
 
 #define _POSIX_C_SOURCE 200809L
+#define _DEFAULT_SOURCE
+#define _DARWIN_C_SOURCE
 #define _USE_MATH_DEFINES
 #include <stdio.h>
 #include <stdlib.h>
@@ -33,6 +35,13 @@
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <sys/mman.h>
+
+#ifndef MAP_ANONYMOUS
+#ifdef MAP_ANON
+#define MAP_ANONYMOUS MAP_ANON
+#endif
+#endif
+
 #include "sound_bonfire.h"
 #include "sound_ds_ambient.h"
 #include "sound_wood_ambient.h"
